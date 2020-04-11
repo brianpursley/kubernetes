@@ -440,14 +440,16 @@ func lockFile(filename string) error {
 	// TODO: find a way to do this with actual file locks. Will
 	// probably need separate solution for windows and Linux.
 
+	lockFilename := lockName(filename)
+
 	// Make sure the dir exists before we try to create a lock file.
-	dir := filepath.Dir(filename)
+	dir := filepath.Dir(lockFilename)
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		if err = os.MkdirAll(dir, 0755); err != nil {
 			return err
 		}
 	}
-	f, err := os.OpenFile(lockName(filename), os.O_CREATE|os.O_EXCL, 0)
+	f, err := os.OpenFile(lockFilename, os.O_CREATE|os.O_EXCL, 0)
 	if err != nil {
 		return err
 	}
@@ -460,7 +462,7 @@ func unlockFile(filename string) error {
 }
 
 func lockName(filename string) string {
-	return filename + ".lock"
+	return path.Join(os.TempDir(), "k8s-lock", filename)
 }
 
 // Write serializes the config to yaml.
