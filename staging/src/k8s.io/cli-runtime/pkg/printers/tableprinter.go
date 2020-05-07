@@ -17,6 +17,7 @@ limitations under the License.
 package printers
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"reflect"
@@ -209,12 +210,26 @@ func printTable(table *metav1.Table, output io.Writer, options PrintOptions) err
 				fmt.Fprint(output, "\t")
 			}
 			if cell != nil {
-				fmt.Fprint(output, cell)
+				printCell(output, cell)
 			}
 		}
 		fmt.Fprintln(output)
 	}
 	return nil
+}
+
+func printCell(output io.Writer, cell interface{}) {
+	t := reflect.TypeOf(cell)
+	if t.Kind() == reflect.Slice {
+		// If the cell is a slice, display it as JSON
+		if value, err := json.Marshal(cell); err != nil {
+			fmt.Fprint(output, "<error>")
+		} else {
+			fmt.Fprint(output, string(value))
+		}
+	} else {
+		fmt.Fprint(output, cell)
+	}
 }
 
 type cellValueFunc func(metav1.TableRow) (interface{}, error)

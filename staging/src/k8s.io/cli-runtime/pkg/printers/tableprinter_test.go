@@ -383,6 +383,54 @@ pod/test1   1/1     podPhase   5         20h
 	}
 }
 
+func TestPrintTable_WithSliceTypes(t *testing.T) {
+	tests := []struct {
+		columns  []metav1.TableColumnDefinition
+		rows     []metav1.TableRow
+		options  PrintOptions
+		expected string
+	}{
+		{
+			columns: []metav1.TableColumnDefinition{
+				{Name: "Foo", Type: "integer"},
+				{Name: "Foo2", Type: "integer"},
+				{Name: "Bar", Type: "string"},
+				{Name: "Bar2", Type: "string"},
+			},
+			rows: []metav1.TableRow{
+				{
+					Cells: []interface{}{
+						[]int64{1, 2, 3},
+						[][]int64{{4, 5}, {6}},
+						[]string{"a", "b"},
+						[][]string{{"x", "y"}, {"z", "something with a space"}},
+					},
+				},
+			},
+			// Print with Kind "pod" prepended to name.
+			options: PrintOptions{WithKind: true, Kind: schema.GroupKind{Kind: "Pod"}},
+			expected: `FOO       FOO2          BAR         BAR2
+[1,2,3]   [[4,5],[6]]   ["a","b"]   [["x","y"],["z","something with a space"]]
+`,
+		},
+	}
+	for _, test := range tests {
+		// Create the table from the columns and rows.
+		table := &metav1.Table{
+			ColumnDefinitions: test.columns,
+			Rows:              test.rows,
+		}
+		// Print the table
+		out := bytes.NewBuffer([]byte{})
+		printer := NewTablePrinter(test.options)
+		printer.PrintObj(table, out)
+		// Validate the expected output matches the printed table.
+		if test.expected != out.String() {
+			t.Errorf("Table printing error: expected:\n%v\ngot:\n%v\n", test.expected, out.String())
+		}
+	}
+}
+
 func TestPrintTable_WithLabels(t *testing.T) {
 	tests := []struct {
 		columns  []metav1.TableColumnDefinition

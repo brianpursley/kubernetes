@@ -19,6 +19,7 @@ package tableconvertor
 import (
 	"context"
 	"fmt"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"reflect"
 	"testing"
 	"time"
@@ -51,9 +52,9 @@ func Test_cellForJSONValue(t *testing.T) {
 		{"boolean", true, true},
 		{"boolean", "foo", nil},
 
-		{"string", int64(42), nil},
-		{"string", float64(3.14), nil},
-		{"string", true, nil},
+		{"string", int64(42), "42"},
+		{"string", float64(3.14), "3.14"},
+		{"string", true, "true"},
 		{"string", "foo", "foo"},
 
 		{"date", int64(42), nil},
@@ -201,6 +202,152 @@ func Test_convertor_ConvertToTable(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "Return table with additional column containing multiple string values",
+			fields: fields{
+				headers: []metav1.TableColumnDefinition{
+					{Name: "name", Type: "string"},
+					{Name: "valueOnly", Type: "string"},
+					{Name: "single1", Type: "string"},
+					{Name: "single2", Type: "string"},
+					{Name: "multi", Type: "string"},
+				},
+				additionalColumns: []*jsonpath.JSONPath{
+					newJSONPath("valueOnly", "{.spec.servers[0].hosts[0]}"),
+					newJSONPath("single1", "{.spec.servers[0].hosts}"),
+					newJSONPath("single2", "{.spec.servers[1].hosts}"),
+					newJSONPath("multi", "{.spec.servers[*].hosts}"),
+				},
+			},
+			args: args{
+				obj: &unstructured.Unstructured{
+					Object: map[string]interface{}{
+						"apiVersion": "example.istio.io/v1alpha1",
+						"kind":       "Blah",
+						"metadata": map[string]interface{}{
+							"name": "blah",
+						},
+						"spec": map[string]interface{}{
+							"servers": []map[string]interface{}{
+								{"hosts": []string{"foo"}},
+								{"hosts": []string{"bar", "baz"}},
+							},
+						},
+					},
+				},
+				tableOptions: nil,
+			},
+			want: &metav1.Table{
+				ColumnDefinitions: []metav1.TableColumnDefinition{
+					{Name: "name", Type: "string"},
+					{Name: "valueOnly", Type: "string"},
+					{Name: "single1", Type: "string"},
+					{Name: "single2", Type: "string"},
+					{Name: "multi", Type: "string"},
+				},
+				Rows: []metav1.TableRow{
+					{
+						Cells: []interface{}{
+							"blah",
+							"foo",
+							[]string{"foo"},
+							[]string{"bar", "baz"},
+							[][]string{{"foo"}, {"bar", "baz"}},
+						},
+						Object: runtime.RawExtension{
+							Object: &unstructured.Unstructured{
+								Object: map[string]interface{}{
+									"apiVersion": "example.istio.io/v1alpha1",
+									"kind":       "Blah",
+									"metadata": map[string]interface{}{
+										"name": "blah",
+									},
+									"spec": map[string]interface{}{
+										"servers": []map[string]interface{}{
+											{"hosts": []string{"foo"}},
+											{"hosts": []string{"bar", "baz"}},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "Return table with additional column containing multiple integer values",
+			fields: fields{
+				headers: []metav1.TableColumnDefinition{
+					{Name: "name", Type: "string"},
+					{Name: "valueOnly", Type: "integer"},
+					{Name: "single1", Type: "integer"},
+					{Name: "single2", Type: "integer"},
+					{Name: "multi", Type: "integer"},
+				},
+				additionalColumns: []*jsonpath.JSONPath{
+					newJSONPath("valueOnly", "{.spec.foo[0].bar[0]}"),
+					newJSONPath("single1", "{.spec.foo[0].bar}"),
+					newJSONPath("single2", "{.spec.foo[1].bar}"),
+					newJSONPath("multi", "{.spec.foo[*].bar}"),
+				},
+			},
+			args: args{
+				obj: &unstructured.Unstructured{
+					Object: map[string]interface{}{
+						"apiVersion": "example.istio.io/v1alpha1",
+						"kind":       "Blah",
+						"metadata": map[string]interface{}{
+							"name": "blah",
+						},
+						"spec": map[string]interface{}{
+							"foo": []map[string]interface{}{
+								{"bar": []int64{1}},
+								{"bar": []int64{2, 3}},
+							},
+						},
+					},
+				},
+				tableOptions: nil,
+			},
+			want: &metav1.Table{
+				ColumnDefinitions: []metav1.TableColumnDefinition{
+					{Name: "name", Type: "string"},
+					{Name: "valueOnly", Type: "integer"},
+					{Name: "single1", Type: "integer"},
+					{Name: "single2", Type: "integer"},
+					{Name: "multi", Type: "integer"},
+				},
+				Rows: []metav1.TableRow{
+					{
+						Cells: []interface{}{
+							"blah",
+							int64(1),
+							[]int64{1},
+							[]int64{2, 3},
+							[][]int64{{1}, {2, 3}},
+						},
+						Object: runtime.RawExtension{
+							Object: &unstructured.Unstructured{
+								Object: map[string]interface{}{
+									"apiVersion": "example.istio.io/v1alpha1",
+									"kind":       "Blah",
+									"metadata": map[string]interface{}{
+										"name": "blah",
+									},
+									"spec": map[string]interface{}{
+										"foo": []map[string]interface{}{
+											{"bar": []int64{1}},
+											{"bar": []int64{2, 3}},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -218,4 +365,10 @@ func Test_convertor_ConvertToTable(t *testing.T) {
 			}
 		})
 	}
+}
+
+func newJSONPath(name string, jsonPathExpression string) *jsonpath.JSONPath {
+	jp := jsonpath.New(name)
+	_ = jp.Parse(jsonPathExpression)
+	return jp
 }

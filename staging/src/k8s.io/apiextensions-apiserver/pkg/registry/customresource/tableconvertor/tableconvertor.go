@@ -17,7 +17,6 @@ limitations under the License.
 package tableconvertor
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -95,7 +94,6 @@ func (c *convertor) ConvertToTable(ctx context.Context, obj runtime.Object, tabl
 	}
 
 	var err error
-	buf := &bytes.Buffer{}
 	table.Rows, err = metatable.MetaToTableRow(obj, func(obj runtime.Object, m metav1.Object, name, age string) ([]interface{}, error) {
 		cells := make([]interface{}, 1, 1+len(c.additionalColumns))
 		cells[0] = name
@@ -107,22 +105,44 @@ func (c *convertor) ConvertToTable(ctx context.Context, obj runtime.Object, tabl
 				continue
 			}
 
-			// as we only support simple JSON path, we can assume to have only one result (or none, filtered out above)
-			value := results[0][0].Interface()
-			if customHeaders[i].Type == "string" {
-				if err := column.PrintResults(buf, []reflect.Value{reflect.ValueOf(value)}); err == nil {
-					cells = append(cells, buf.String())
-					buf.Reset()
-				} else {
-					cells = append(cells, nil)
-				}
+			values := results[0]
+			firstValue := values[0].Interface()
+			if len(values) > 1 {
+				// FindResults() returned more than one result. Set the cell value of a slice containing the results
+				cells = append(cells, cellForMultipleSlices(values))
+			} else if reflect.TypeOf(firstValue).Kind() == reflect.Slice {
+				// FindResults() returned a single result that is a slice. Set the cell value to that slice
+				cells = append(cells, cellForSlice(firstValue))
 			} else {
-				cells = append(cells, cellForJSONValue(customHeaders[i].Type, value))
+				// FindResults() returned a single value. Set the cell value based on the header type
+				cells = append(cells, cellForJSONValue(customHeaders[i].Type, firstValue))
 			}
 		}
 		return cells, nil
 	})
 	return table, err
+}
+
+func cellForMultipleSlices(values []reflect.Value) interface{} {
+	firstValue := values[0].Interface()
+	sliceType := reflect.SliceOf(reflect.TypeOf(firstValue))
+	result := reflect.MakeSlice(sliceType, len(values), len(values))
+	for i, v := range values {
+		result.Index(i).Set(reflect.ValueOf(v.Interface()))
+	}
+	return result.Interface()
+}
+
+func cellForSlice(values interface{}) interface{} {
+	slice := reflect.ValueOf(values)
+	firstValue := slice.Index(0).Interface()
+	sliceType := reflect.SliceOf(reflect.TypeOf(firstValue))
+	result := reflect.MakeSlice(sliceType, slice.Len(), slice.Len())
+	for i := 0; i < slice.Len(); i++ {
+		v := slice.Index(i)
+		result.Index(i).Set(reflect.ValueOf(v.Interface()))
+	}
+	return result.Interface()
 }
 
 func cellForJSONValue(headerType string, value interface{}) interface{} {
@@ -161,6 +181,7 @@ func cellForJSONValue(headerType string, value interface{}) interface{} {
 		if s, ok := value.(string); ok {
 			return s
 		}
+		return fmt.Sprintf("%v", value)
 	case "date":
 		if typed, ok := value.(string); ok {
 			var timestamp metav1.Time
