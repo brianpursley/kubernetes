@@ -33,6 +33,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/api/events/v1beta1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -63,6 +64,10 @@ import (
 )
 
 type fakePodConditionUpdater struct{}
+
+func (fc fakePodConditionUpdater) getUpdatedPod(pod *v1.Pod) (*v1.Pod, error) {
+	return pod, nil
+}
 
 func (fc fakePodConditionUpdater) update(pod *v1.Pod, podCondition *v1.PodCondition) error {
 	return nil
@@ -1198,5 +1203,79 @@ func TestSchedulerBinding(t *testing.T) {
 			}
 
 		})
+	}
+}
+
+func TestSetNominatedNodeNameShouldRetryOnConflict(t *testing.T) {
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo"}}
+
+	actualUpdateRequests := 0
+	actualGetRequests := 0
+	cs := &clientsetfake.Clientset{}
+	conflict := true
+	cs.AddReactor("update", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		actualUpdateRequests++
+		update := action.(clienttesting.UpdateAction)
+		if conflict {
+			conflict = false
+			return true, update.GetObject(), apierrors.NewConflict(action.GetResource().GroupResource(), pod.Name, errors.New("conflict"))
+		}
+		return true, update.GetObject(), nil
+	})
+	cs.AddReactor("get", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		actualGetRequests++
+		return true, &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo"}}, nil
+	})
+
+	preemptor := &podPreemptorImpl{Client: cs}
+	if err := preemptor.setNominatedNodeName(pod, "bar"); err != nil {
+		t.Fatalf("Error calling setNominatedNodeName: %v", err)
+	}
+
+	expectedUpdateRequests := 2
+	if actualUpdateRequests != expectedUpdateRequests {
+		t.Fatalf("Actual update requests (%d) dos not equal expected update requests (%d)", actualUpdateRequests, expectedUpdateRequests)
+	}
+
+	expectedGetRequests := 1
+	if actualGetRequests != expectedGetRequests {
+		t.Fatalf("Actual get requests (%d) dos not equal expected get requests (%d)", actualUpdateRequests, expectedUpdateRequests)
+	}
+}
+
+func TestUpdatePodConditionShouldRetryOnConflict(t *testing.T) {
+	pod := &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo"}}
+
+	actualUpdateRequests := 0
+	actualGetRequests := 0
+	cs := &clientsetfake.Clientset{}
+	conflict := true
+	cs.AddReactor("update", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		actualUpdateRequests++
+		update := action.(clienttesting.UpdateAction)
+		if conflict {
+			conflict = false
+			return true, update.GetObject(), apierrors.NewConflict(action.GetResource().GroupResource(), pod.Name, errors.New("conflict"))
+		}
+		return true, update.GetObject(), nil
+	})
+	cs.AddReactor("get", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		actualGetRequests++
+		return true, &v1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "foo"}}, nil
+	})
+
+	updater := &podConditionUpdaterImpl{Client: cs}
+	if err := updater.update(pod, &v1.PodCondition{}); err != nil {
+		t.Fatalf("Error calling update: %v", err)
+	}
+
+	expectedUpdateRequests := 2
+	if actualUpdateRequests != expectedUpdateRequests {
+		t.Fatalf("Actual update requests (%d) dos not equal expected update requests (%d)", actualUpdateRequests, expectedUpdateRequests)
+	}
+
+	expectedGetRequests := 1
+	if actualGetRequests != expectedGetRequests {
+		t.Fatalf("Actual get requests (%d) dos not equal expected get requests (%d)", actualUpdateRequests, expectedUpdateRequests)
 	}
 }

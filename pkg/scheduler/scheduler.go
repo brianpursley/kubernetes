@@ -32,6 +32,7 @@ import (
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/controller/volume/scheduling"
@@ -55,10 +56,17 @@ const (
 	pluginMetricsSamplePercent = 10
 )
 
+var updateConflictBackoff = wait.Backoff{
+	Steps:    5,
+	Duration: 100 * time.Millisecond,
+	Jitter:   1.0,
+}
+
 // podConditionUpdater updates the condition of a pod based on the passed
 // PodCondition
 // TODO (ahmad-diaa): Remove type and replace it with scheduler methods
 type podConditionUpdater interface {
+	getUpdatedPod(pod *v1.Pod) (*v1.Pod, error)
 	update(pod *v1.Pod, podCondition *v1.PodCondition) error
 }
 
@@ -778,13 +786,30 @@ type podConditionUpdaterImpl struct {
 	Client clientset.Interface
 }
 
+func (p *podConditionUpdaterImpl) getUpdatedPod(pod *v1.Pod) (*v1.Pod, error) {
+	return p.Client.CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
+}
+
 func (p *podConditionUpdaterImpl) update(pod *v1.Pod, condition *v1.PodCondition) error {
 	klog.V(3).Infof("Updating pod condition for %s/%s to (%s==%s, Reason=%s)", pod.Namespace, pod.Name, condition.Type, condition.Status, condition.Reason)
-	if podutil.UpdatePodCondition(&pod.Status, condition) {
-		_, err := p.Client.CoreV1().Pods(pod.Namespace).UpdateStatus(context.TODO(), pod, metav1.UpdateOptions{})
-		return err
-	}
-	return nil
+	// First try to update using the pod that was passed in. If conflict occurs, get latest pod and try again.
+	firstTry := true
+	return retry.RetryOnConflict(updateConflictBackoff, func() error {
+		if firstTry {
+			firstTry = false
+		} else {
+			var err error
+			pod, err = p.getUpdatedPod(pod)
+			if err != nil {
+				return err
+			}
+		}
+		if podutil.UpdatePodCondition(&pod.Status, condition) {
+			_, err := p.Client.CoreV1().Pods(pod.Namespace).UpdateStatus(context.TODO(), pod, metav1.UpdateOptions{})
+			return err
+		}
+		return nil
+	})
 }
 
 type podPreemptorImpl struct {
@@ -800,10 +825,24 @@ func (p *podPreemptorImpl) deletePod(pod *v1.Pod) error {
 }
 
 func (p *podPreemptorImpl) setNominatedNodeName(pod *v1.Pod, nominatedNodeName string) error {
+	klog.V(3).Infof("Setting nominated node name for %s/%s to \"%s\"", pod.Namespace, pod.Name, nominatedNodeName)
 	podCopy := pod.DeepCopy()
-	podCopy.Status.NominatedNodeName = nominatedNodeName
-	_, err := p.Client.CoreV1().Pods(pod.Namespace).UpdateStatus(context.TODO(), podCopy, metav1.UpdateOptions{})
-	return err
+	// First try to update using the pod that was passed in. If conflict occurs, get latest pod and try again.
+	firstTry := true
+	return retry.RetryOnConflict(updateConflictBackoff, func() error {
+		if firstTry {
+			firstTry = false
+		} else {
+			var err error
+			podCopy, err = p.getUpdatedPod(pod)
+			if err != nil {
+				return err
+			}
+		}
+		podCopy.Status.NominatedNodeName = nominatedNodeName
+		_, err := p.Client.CoreV1().Pods(podCopy.Namespace).UpdateStatus(context.TODO(), podCopy, metav1.UpdateOptions{})
+		return err
+	})
 }
 
 func (p *podPreemptorImpl) removeNominatedNodeName(pod *v1.Pod) error {
