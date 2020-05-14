@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
@@ -53,7 +54,7 @@ var (
 		kubectl config set-cluster e2e --server=https://1.2.3.4
 
 		# Embed certificate authority data for the e2e cluster entry
-		kubectl config set-cluster e2e --certificate-authority=~/.kube/e2e/kubernetes.ca.crt
+		kubectl config set-cluster e2e --embed-certs --certificate-authority=~/.kube/e2e/kubernetes.ca.crt
 
 		# Disable cert checking for the dev cluster entry
 		kubectl config set-cluster e2e --insecure-skip-tls-verify=true
@@ -108,8 +109,11 @@ func (o createClusterOptions) run() error {
 	if !exists {
 		startingStanza = clientcmdapi.NewCluster()
 	}
-	cluster := o.modifyCluster(*startingStanza)
-	config.Clusters[o.name] = &cluster
+	cluster, err := o.modifyCluster(*startingStanza)
+	if err != nil {
+		return err
+	}
+	config.Clusters[o.name] = cluster
 
 	if err := clientcmd.ModifyConfig(o.configAccess, *config, true); err != nil {
 		return err
@@ -119,7 +123,7 @@ func (o createClusterOptions) run() error {
 }
 
 // cluster builds a Cluster object from the options
-func (o *createClusterOptions) modifyCluster(existingCluster clientcmdapi.Cluster) clientcmdapi.Cluster {
+func (o *createClusterOptions) modifyCluster(existingCluster clientcmdapi.Cluster) (*clientcmdapi.Cluster, error) {
 	modifiedCluster := existingCluster
 
 	if o.server.Provided() {
@@ -142,7 +146,11 @@ func (o *createClusterOptions) modifyCluster(existingCluster clientcmdapi.Cluste
 	if o.certificateAuthority.Provided() {
 		caPath := o.certificateAuthority.Value()
 		if o.embedCAData.Value() {
-			modifiedCluster.CertificateAuthorityData, _ = ioutil.ReadFile(caPath)
+			var err error
+			modifiedCluster.CertificateAuthorityData, err = ioutil.ReadFile(caPath)
+			if err != nil {
+				return nil, fmt.Errorf("could not read %s data from %s: %v", clientcmd.FlagCAFile, caPath, err)
+			}
 			modifiedCluster.InsecureSkipTLSVerify = false
 			modifiedCluster.CertificateAuthority = ""
 		} else {
@@ -156,7 +164,7 @@ func (o *createClusterOptions) modifyCluster(existingCluster clientcmdapi.Cluste
 		}
 	}
 
-	return modifiedCluster
+	return &modifiedCluster, nil
 }
 
 func (o *createClusterOptions) complete(cmd *cobra.Command) error {
@@ -181,8 +189,8 @@ func (o createClusterOptions) validate() error {
 		if caPath == "" {
 			return fmt.Errorf("you must specify a --%s to embed", clientcmd.FlagCAFile)
 		}
-		if _, err := ioutil.ReadFile(caPath); err != nil {
-			return fmt.Errorf("could not read %s data from %s: %v", clientcmd.FlagCAFile, caPath, err)
+		if _, err := os.Stat(caPath); err != nil {
+			return fmt.Errorf("could not stat %s file %s: %v", clientcmd.FlagCAFile, caPath, err)
 		}
 	}
 

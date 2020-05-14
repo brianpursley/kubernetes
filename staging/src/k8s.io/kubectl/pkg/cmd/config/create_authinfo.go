@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -196,8 +197,11 @@ func (o createAuthInfoOptions) run() error {
 	if !exists {
 		startingStanza = clientcmdapi.NewAuthInfo()
 	}
-	authInfo := o.modifyAuthInfo(*startingStanza)
-	config.AuthInfos[o.name] = &authInfo
+	authInfo, err := o.modifyAuthInfo(*startingStanza)
+	if err != nil {
+		return err
+	}
+	config.AuthInfos[o.name] = authInfo
 
 	if err := clientcmd.ModifyConfig(o.configAccess, *config, true); err != nil {
 		return err
@@ -207,15 +211,19 @@ func (o createAuthInfoOptions) run() error {
 }
 
 // authInfo builds an AuthInfo object from the options
-func (o *createAuthInfoOptions) modifyAuthInfo(existingAuthInfo clientcmdapi.AuthInfo) clientcmdapi.AuthInfo {
+func (o *createAuthInfoOptions) modifyAuthInfo(existingAuthInfo clientcmdapi.AuthInfo) (*clientcmdapi.AuthInfo, error) {
 	modifiedAuthInfo := existingAuthInfo
 
 	var setToken, setBasic bool
+	var err error
 
 	if o.clientCertificate.Provided() {
 		certPath := o.clientCertificate.Value()
 		if o.embedCertData.Value() {
-			modifiedAuthInfo.ClientCertificateData, _ = ioutil.ReadFile(certPath)
+			modifiedAuthInfo.ClientCertificateData, err = ioutil.ReadFile(certPath)
+			if err != nil {
+				return nil, err
+			}
 			modifiedAuthInfo.ClientCertificate = ""
 		} else {
 			certPath, _ = filepath.Abs(certPath)
@@ -228,7 +236,10 @@ func (o *createAuthInfoOptions) modifyAuthInfo(existingAuthInfo clientcmdapi.Aut
 	if o.clientKey.Provided() {
 		keyPath := o.clientKey.Value()
 		if o.embedCertData.Value() {
-			modifiedAuthInfo.ClientKeyData, _ = ioutil.ReadFile(keyPath)
+			modifiedAuthInfo.ClientKeyData, err = ioutil.ReadFile(keyPath)
+			if err != nil {
+				return nil, err
+			}
 			modifiedAuthInfo.ClientKey = ""
 		} else {
 			keyPath, _ = filepath.Abs(keyPath)
@@ -352,7 +363,7 @@ func (o *createAuthInfoOptions) modifyAuthInfo(existingAuthInfo clientcmdapi.Aut
 		}
 	}
 
-	return modifiedAuthInfo
+	return &modifiedAuthInfo, nil
 }
 
 func (o *createAuthInfoOptions) complete(cmd *cobra.Command, out io.Writer) error {
@@ -421,13 +432,13 @@ func (o createAuthInfoOptions) validate() error {
 			return fmt.Errorf("you must specify a --%s or --%s to embed", clientcmd.FlagCertFile, clientcmd.FlagKeyFile)
 		}
 		if certPath != "" {
-			if _, err := ioutil.ReadFile(certPath); err != nil {
-				return fmt.Errorf("error reading %s data from %s: %v", clientcmd.FlagCertFile, certPath, err)
+			if _, err := os.Stat(certPath); err != nil {
+				return fmt.Errorf("could not stat %s file %s: %v", clientcmd.FlagCertFile, certPath, err)
 			}
 		}
 		if keyPath != "" {
-			if _, err := ioutil.ReadFile(keyPath); err != nil {
-				return fmt.Errorf("error reading %s data from %s: %v", clientcmd.FlagKeyFile, keyPath, err)
+			if _, err := os.Stat(keyPath); err != nil {
+				return fmt.Errorf("coult not stat %s file %s: %v", clientcmd.FlagKeyFile, keyPath, err)
 			}
 		}
 	}
