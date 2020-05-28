@@ -328,6 +328,7 @@ var _ = utils.SIGDescribe("PersistentVolumes-local ", func() {
 			pod := makeLocalPodWithNodeName(config, testVol, config.nodes[1].Name)
 			pod, err := config.client.CoreV1().Pods(config.ns).Create(context.TODO(), pod, metav1.CreateOptions{})
 			framework.ExpectNoError(err)
+			defer framework.ExpectNoError(e2epod.DeletePodWithWait(config.client, pod))
 
 			err = e2epod.WaitTimeoutForPodRunningInNamespace(config.client, pod.Name, pod.Namespace, framework.PodStartShortTimeout)
 			framework.ExpectError(err)
@@ -388,7 +389,7 @@ var _ = utils.SIGDescribe("PersistentVolumes-local ", func() {
 
 		ginkgo.AfterEach(func() {
 			for _, vols := range testVols {
-				cleanupLocalVolumes(config, vols)
+				cleanupLocalPVCsPVs(config, vols)
 			}
 			cleanupStorageClass(config)
 		})
@@ -399,12 +400,14 @@ var _ = utils.SIGDescribe("PersistentVolumes-local ", func() {
 			}
 			ginkgo.By("Creating a StatefulSet with pod anti-affinity on nodes")
 			ss := createStatefulSet(config, ssReplicas, volsPerNode, true, false)
+			defer cleanupStatefulSet(config, ss)
 			validateStatefulSet(config, ss, true)
 		})
 
 		ginkgo.It("should use volumes on one node when pod has affinity", func() {
 			ginkgo.By("Creating a StatefulSet with pod affinity on nodes")
 			ss := createStatefulSet(config, ssReplicas, volsPerNode/ssReplicas, false, false)
+			defer cleanupStatefulSet(config, ss)
 			validateStatefulSet(config, ss, false)
 		})
 
@@ -414,12 +417,14 @@ var _ = utils.SIGDescribe("PersistentVolumes-local ", func() {
 			}
 			ginkgo.By("Creating a StatefulSet with pod anti-affinity on nodes")
 			ss := createStatefulSet(config, ssReplicas, 1, true, true)
+			defer cleanupStatefulSet(config, ss)
 			validateStatefulSet(config, ss, true)
 		})
 
 		ginkgo.It("should use volumes on one node when pod management is parallel and pod has affinity", func() {
 			ginkgo.By("Creating a StatefulSet with pod affinity on nodes")
 			ss := createStatefulSet(config, ssReplicas, 1, false, true)
+			defer cleanupStatefulSet(config, ss)
 			validateStatefulSet(config, ss, false)
 		})
 	})
@@ -646,6 +651,7 @@ var _ = utils.SIGDescribe("PersistentVolumes-local ", func() {
 				err   error
 			)
 			pvc = e2epv.MakePersistentVolumeClaim(makeLocalPVCConfig(config, DirectoryLocalVolumeType), config.ns)
+			defer framework.ExpectNoError(e2epv.DeletePersistentVolumeClaim(config.client, pvc.Name, config.ns))
 			ginkgo.By(fmt.Sprintf("Create a PVC %s", pvc.Name))
 			pvc, err = e2epv.CreatePVC(config.client, config.ns, pvc)
 			framework.ExpectNoError(err)
@@ -663,6 +669,18 @@ var _ = utils.SIGDescribe("PersistentVolumes-local ", func() {
 				framework.ExpectNoError(err)
 				pods[pod.Name] = pod
 			}
+			defer func() {
+				var wg sync.WaitGroup
+				for _, pod := range pods {
+					pod := pod
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						framework.ExpectNoError(e2epod.DeletePodWithWait(config.client, pod))
+					}()
+				}
+				wg.Wait()
+			}()
 			ginkgo.By("Wait for all pods are running")
 			const runningTimeout = 5 * time.Minute
 			waitErr := wait.PollImmediate(time.Second, runningTimeout, func() (done bool, err error) {
@@ -1196,6 +1214,10 @@ func createStatefulSet(config *localTestConfig, ssReplicas int32, volumeCount in
 
 	e2estatefulset.WaitForRunningAndReady(config.client, ssReplicas, ss)
 	return ss
+}
+
+func cleanupStatefulSet(config *localTestConfig, ss *appsv1.StatefulSet) {
+	framework.ExpectNoError(config.client.AppsV1().StatefulSets(config.ns).Delete(context.TODO(), ss.Name, metav1.DeleteOptions{}))
 }
 
 func validateStatefulSet(config *localTestConfig, ss *appsv1.StatefulSet, anti bool) {
