@@ -1046,6 +1046,10 @@ func (e *Store) DeleteCollection(ctx context.Context, deleteValidation rest.Vali
 			defer wg.Done()
 
 			for index := range toProcess {
+				if err := ctx.Err(); err != nil {
+					klog.V(4).Infof("Breaking out of DeleteCollection worker loop because context had error: %v:", err)
+					break
+				}
 				accessor, err := meta.Accessor(items[index])
 				if err != nil {
 					errs <- err
