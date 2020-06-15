@@ -775,3 +775,27 @@ func testDynamicResources() []*restmapper.APIGroupResources {
 		},
 	}
 }
+
+type FakeConfigAccess struct {
+	Config *clientcmdapi.Config
+}
+
+func (fca *FakeConfigAccess) GetLoadingPrecedence() []string {
+	panic("not implemented")
+}
+
+func (fca *FakeConfigAccess) GetDefaultFilename() string {
+	panic("not implemented")
+}
+
+func (fca *FakeConfigAccess) IsExplicitFile() bool {
+	panic("not implemented")
+}
+
+func (fca *FakeConfigAccess) GetExplicitFile() string {
+	panic("not implemented")
+}
+
+func (fca *FakeConfigAccess) GetStartingConfig() (*clientcmdapi.Config, error) {
+	return fca.Config, nil
+}
