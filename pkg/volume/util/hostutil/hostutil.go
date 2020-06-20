@@ -78,10 +78,6 @@ var _ HostUtils = &HostUtil{}
 func getFileType(pathname string) (FileType, error) {
 	var pathType FileType
 	info, err := os.Stat(pathname)
-	if os.IsNotExist(err) {
-		return pathType, fmt.Errorf("path %q does not exist", pathname)
-	}
-	// err in call to os.Stat
 	if err != nil {
 		return pathType, err
 	}

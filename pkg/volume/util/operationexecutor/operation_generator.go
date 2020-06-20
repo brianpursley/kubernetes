@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -831,12 +830,18 @@ func (og *operationGenerator) GenerateUnmountDeviceFunc(
 	}
 
 	unmountDeviceFunc := func() (error, error) {
-		//deviceMountPath := deviceToDetach.DeviceMountPath
 		deviceMountPath, err :=
 			volumeDeviceMounter.GetDeviceMountPath(deviceToDetach.VolumeSpec)
 		if err != nil {
-			// On failure, return error. Caller will log and retry.
-			return deviceToDetach.GenerateError("GetDeviceMountPath failed", err)
+			if !goerrors.Is(err, os.ErrNotExist) {
+				// On failure other than not exist, return error. Caller will log and retry.
+				return deviceToDetach.GenerateError("GetDeviceMountPath failed", err)
+			}
+			// If the mount path could not be found, don't fail the unmount, but instead just use the value from
+			// deviceToDetach.DeviceMountPath and proceed so that the device can be marked as unmounted
+			deviceMountPath = deviceToDetach.DeviceMountPath
+			klog.Warningf(deviceToDetach.GenerateMsg(fmt.Sprintf(
+				"GetDeviceMountPath failed, but unmount operation will continue (using deviceMountPath=%s): %v", deviceMountPath, err), ""))
 		}
 		refs, err := deviceMountableVolumePlugin.GetDeviceMountRefs(deviceMountPath)
 
@@ -844,13 +849,20 @@ func (og *operationGenerator) GenerateUnmountDeviceFunc(
 			if err == nil {
 				err = fmt.Errorf("The device mount path %q is still mounted by other references %v", deviceMountPath, refs)
 			}
-			return deviceToDetach.GenerateError("GetDeviceMountRefs check failed", err)
+			if !goerrors.Is(err, os.ErrNotExist) {
+				// On failure other than not exist, return error. Caller will log and retry.
+				return deviceToDetach.GenerateError("GetDeviceMountRefs failed", err)
+			}
+			klog.Warningf(deviceToDetach.GenerateMsg(fmt.Sprintf("GetDeviceMountRefs failed, but unmount operation will continue: %v", err), ""))
 		}
 		// Execute unmount
 		unmountDeviceErr := volumeDeviceUmounter.UnmountDevice(deviceMountPath)
 		if unmountDeviceErr != nil {
-			// On failure, return error. Caller will log and retry.
-			return deviceToDetach.GenerateError("UnmountDevice failed", unmountDeviceErr)
+			if !goerrors.Is(unmountDeviceErr, os.ErrNotExist) {
+				// On failure other than not exist, return error. Caller will log and retry.
+				return deviceToDetach.GenerateError("UnmountDevice failed", unmountDeviceErr)
+			}
+			klog.Warningf(deviceToDetach.GenerateMsg(fmt.Sprintf("UnmountDevice failed, but unmount operation will continue: %v", unmountDeviceErr), ""))
 		}
 		// Before logging that UnmountDevice succeeded and moving on,
 		// use hostutil.PathIsDevice to check if the path is a device,
@@ -1666,7 +1678,7 @@ func isDeviceOpened(deviceToDetach AttachedVolume, hostUtil hostutil.HostUtils) 
 	var deviceOpened bool
 	var deviceOpenedErr error
 	if !isDevicePath && devicePathErr == nil ||
-		(devicePathErr != nil && strings.Contains(devicePathErr.Error(), "does not exist")) {
+		(devicePathErr != nil && goerrors.Is(devicePathErr, os.ErrNotExist)) {
 		// not a device path or path doesn't exist
 		//TODO: refer to #36092
 		klog.V(3).Infof("The path isn't device path or doesn't exist. Skip checking device path: %s", deviceToDetach.DevicePath)

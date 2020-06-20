@@ -36,6 +36,7 @@ go_test(
     name = "go_default_test",
     srcs = [
         "hostutil_linux_test.go",
+        "hostutil_test.go",
         "hostutil_windows_test.go",
     ],
     embed = [":go_default_library"],
