@@ -131,11 +131,11 @@ func (p *PodMetricsSorter) Less(i, j int) bool {
 	}
 }
 
-func NewPodMetricsSorter(metrics []metricsapi.PodMetrics, printContainers bool, withNamespace bool, sortBy string) (*PodMetricsSorter, error) {
+func NewPodMetricsSorter(metrics []metricsapi.PodMetrics, withNamespace bool, sortBy string) (*PodMetricsSorter, error) {
 	var podMetrics = make([]v1.ResourceList, len(metrics))
 	if len(sortBy) > 0 {
 		for i, v := range metrics {
-			podMetrics[i], _, _ = getPodMetrics(&v, printContainers)
+			podMetrics[i], _, _ = getPodMetrics(&v)
 		}
 	}
 
@@ -185,6 +185,29 @@ func (printer *TopCmdPrinter) PrintPodMetrics(metrics []metricsapi.PodMetrics, p
 	if len(metrics) == 0 {
 		return nil
 	}
+
+	if printContainers && len(sortBy) > 0 {
+		// In order to be able to use the same code for sorting by cpu/memory for containers,
+		// we "explode" the metrics, duplicating the PodMetrics object for each single container.
+		var explodedMetrics []metricsapi.PodMetrics
+		for _, m := range metrics {
+			if len(m.Containers) > 1 {
+				for _, c := range m.Containers {
+					singleContainerPodMetrics := metricsapi.PodMetrics{
+						ObjectMeta: m.ObjectMeta,
+						Timestamp:  m.Timestamp,
+						Window:     m.Window,
+						Containers: []metricsapi.ContainerMetrics{c},
+					}
+					explodedMetrics = append(explodedMetrics, singleContainerPodMetrics)
+				}
+			} else {
+				explodedMetrics = append(explodedMetrics, m)
+			}
+		}
+		metrics = explodedMetrics
+	}
+
 	w := printers.GetNewTabWriter(printer.out)
 	defer w.Flush()
 	if !noHeaders {
@@ -197,7 +220,7 @@ func (printer *TopCmdPrinter) PrintPodMetrics(metrics []metricsapi.PodMetrics, p
 		printColumnNames(w, PodColumns)
 	}
 
-	p, err := NewPodMetricsSorter(metrics, printContainers, withNamespace, sortBy)
+	p, err := NewPodMetricsSorter(metrics, withNamespace, sortBy)
 	if err != nil {
 		return err
 	}
@@ -220,7 +243,7 @@ func printColumnNames(out io.Writer, names []string) {
 }
 
 func printSinglePodMetrics(out io.Writer, m *metricsapi.PodMetrics, printContainersOnly bool, withNamespace bool) error {
-	podMetrics, containers, err := getPodMetrics(m, printContainersOnly)
+	podMetrics, containers, err := getPodMetrics(m)
 	if err != nil {
 		return err
 	}
@@ -249,7 +272,7 @@ func printSinglePodMetrics(out io.Writer, m *metricsapi.PodMetrics, printContain
 	return nil
 }
 
-func getPodMetrics(m *metricsapi.PodMetrics, printContainersOnly bool) (v1.ResourceList, map[string]v1.ResourceList, error) {
+func getPodMetrics(m *metricsapi.PodMetrics) (v1.ResourceList, map[string]v1.ResourceList, error) {
 	containers := make(map[string]v1.ResourceList)
 	podMetrics := make(v1.ResourceList)
 	for _, res := range MeasuredResources {
@@ -260,12 +283,10 @@ func getPodMetrics(m *metricsapi.PodMetrics, printContainersOnly bool) (v1.Resou
 	for _, c := range m.Containers {
 		c.Usage.DeepCopyInto(&usage)
 		containers[c.Name] = usage
-		if !printContainersOnly {
-			for _, res := range MeasuredResources {
-				quantity := podMetrics[res]
-				quantity.Add(usage[res])
-				podMetrics[res] = quantity
-			}
+		for _, res := range MeasuredResources {
+			quantity := podMetrics[res]
+			quantity.Add(usage[res])
+			podMetrics[res] = quantity
 		}
 	}
 	return podMetrics, containers, nil
