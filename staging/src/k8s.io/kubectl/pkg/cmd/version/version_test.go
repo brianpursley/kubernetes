@@ -17,6 +17,8 @@ limitations under the License.
 package version
 
 import (
+	"bytes"
+	apimachineryversion "k8s.io/apimachinery/pkg/version"
 	"strings"
 	"testing"
 
@@ -44,5 +46,87 @@ func TestNewCmdVersionWithoutConfigFile(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "Client Version") {
 		t.Errorf("unexpected output: %s", buf.String())
+	}
+}
+
+func TestSkewWarning(t *testing.T) {
+	o := &Options{}
+
+	var testCases = []struct {
+		description     string
+		clientVersion   *apimachineryversion.Info
+		serverVersion   *apimachineryversion.Info
+		warningExpected bool
+	}{
+		{
+			description:     "same version should not print warning",
+			clientVersion:   &apimachineryversion.Info{Major: "1", Minor: "19"},
+			serverVersion:   &apimachineryversion.Info{Major: "1", Minor: "19"},
+			warningExpected: false,
+		},
+		{
+			description:     "client one minor version behind server should not print warning",
+			clientVersion:   &apimachineryversion.Info{Major: "1", Minor: "19"},
+			serverVersion:   &apimachineryversion.Info{Major: "1", Minor: "20"},
+			warningExpected: false,
+		},
+		{
+			description:     "client one minor version ahead of server should not print warning",
+			clientVersion:   &apimachineryversion.Info{Major: "1", Minor: "20"},
+			serverVersion:   &apimachineryversion.Info{Major: "1", Minor: "19"},
+			warningExpected: false,
+		},
+		{
+			description:     "client two minor versions behind server should print warning",
+			clientVersion:   &apimachineryversion.Info{Major: "1", Minor: "18"},
+			serverVersion:   &apimachineryversion.Info{Major: "1", Minor: "20"},
+			warningExpected: true,
+		},
+		{
+			description:     "client two minor versions ahead of server should print warning",
+			clientVersion:   &apimachineryversion.Info{Major: "1", Minor: "20"},
+			serverVersion:   &apimachineryversion.Info{Major: "1", Minor: "18"},
+			warningExpected: true,
+		},
+		{
+			description:     "client one major version behind server should print warning",
+			clientVersion:   &apimachineryversion.Info{Major: "1", Minor: "1"},
+			serverVersion:   &apimachineryversion.Info{Major: "2", Minor: "1"},
+			warningExpected: true,
+		},
+		{
+			description:     "client one major version ahead of server should print warning",
+			clientVersion:   &apimachineryversion.Info{Major: "2", Minor: "1"},
+			serverVersion:   &apimachineryversion.Info{Major: "1", Minor: "1"},
+			warningExpected: true,
+		},
+		{
+			description:     "should handle no warning scenario when there are non-numeric characters in minor version",
+			clientVersion:   &apimachineryversion.Info{Major: "1", Minor: "20+"},
+			serverVersion:   &apimachineryversion.Info{Major: "1", Minor: "20foo"},
+			warningExpected: false,
+		},
+		{
+			description:     "should handle warning scenario when there are non-numeric characters in minor version",
+			clientVersion:   &apimachineryversion.Info{Major: "1", Minor: "18+"},
+			serverVersion:   &apimachineryversion.Info{Major: "1", Minor: "20foo"},
+			warningExpected: true,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			errOut := &bytes.Buffer{}
+			o.ErrOut = errOut
+			o.checkVersionSkew(tc.clientVersion, tc.serverVersion)
+			if tc.warningExpected {
+				if errOut.Len() == 0 {
+					t.Fatalf("Warning was expected but not printed")
+				}
+			} else {
+				if errOut.Len() > 0 {
+					t.Fatalf("Warning was printed but not expected")
+				}
+			}
+		})
 	}
 }

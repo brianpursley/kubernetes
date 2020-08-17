@@ -20,6 +20,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strconv"
 
 	"github.com/spf13/cobra"
 	"sigs.k8s.io/yaml"
@@ -44,6 +46,7 @@ var (
 	versionExample = templates.Examples(i18n.T(`
 		# Print the client and server versions for the current context
 		kubectl version`))
+	minorVersionNumberRegexp = regexp.MustCompile(`^\d+`)
 )
 
 // Options is a struct to support version command
@@ -158,5 +161,22 @@ func (o *Options) Run() error {
 		return fmt.Errorf("VersionOptions were not validated: --output=%q should have been rejected", o.Output)
 	}
 
+	o.checkVersionSkew(&clientVersion, serverVersion)
+
 	return serverErr
+}
+
+// checkVersionSkew prints a warning to stderr if the version skew is more than +/-1 minor version
+func (o *Options) checkVersionSkew(clientVersion, serverVersion *apimachineryversion.Info) {
+	if serverVersion != nil {
+		const supportedSkew = 1
+		clientMajorVersion, _ := strconv.Atoi(clientVersion.Major)
+		clientMinorVersion, _ := strconv.Atoi(minorVersionNumberRegexp.FindString(clientVersion.Minor))
+		serverMajorVersion, _ := strconv.Atoi(serverVersion.Major)
+		serverMinorVersion, _ := strconv.Atoi(minorVersionNumberRegexp.FindString(serverVersion.Minor))
+		if clientMajorVersion != serverMajorVersion || clientMinorVersion < serverMinorVersion-supportedSkew || clientMinorVersion > serverMinorVersion+supportedSkew {
+			fmt.Fprintf(o.ErrOut, "WARNING: version difference between client (%s.%s) and server (%s.%s) exceeds the supported version skew of +/-%d minor version\n",
+				clientVersion.Major, clientVersion.Minor, serverVersion.Major, serverVersion.Minor, supportedSkew)
+		}
+	}
 }
