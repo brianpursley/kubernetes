@@ -4,6 +4,7 @@ go_library(
     name = "go_default_library",
     srcs = [
         "cmd.go",
+        "completion.go",
         "profiling.go",
     ],
     importpath = "k8s.io/kubernetes/pkg/kubectl/cmd",
@@ -11,9 +12,11 @@ go_library(
     deps = [
         "//pkg/kubectl/cmd/auth:go_default_library",
         "//pkg/kubectl/cmd/convert:go_default_library",
+        "//staging/src/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
         "//staging/src/k8s.io/cli-runtime/pkg/genericclioptions:go_default_library",
         "//staging/src/k8s.io/client-go/rest:go_default_library",
         "//staging/src/k8s.io/client-go/tools/clientcmd:go_default_library",
+        "//staging/src/k8s.io/client-go/tools/clientcmd/api:go_default_library",
         "//staging/src/k8s.io/component-base/cli/flag:go_default_library",
         "//staging/src/k8s.io/kubectl/pkg/cmd:go_default_library",
         "//staging/src/k8s.io/kubectl/pkg/cmd/annotate:go_default_library",
