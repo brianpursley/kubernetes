@@ -98,6 +98,7 @@ type ConfigFlags struct {
 	Username         *string
 	Password         *string
 	Timeout          *string
+	DefaultArgs      map[string][]string
 	// If non-nil, wrap config function can transform the Config
 	// before it is returned in ToRESTConfig function.
 	WrapConfigFn func(*rest.Config) *rest.Config

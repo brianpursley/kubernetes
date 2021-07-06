@@ -303,6 +303,7 @@ func autoConvert_v1_Config_To_api_Config(in *Config, out *api.Config, s conversi
 	if err := Convert_Slice_v1_NamedExtension_To_Map_string_To_runtime_Object(&in.Extensions, &out.Extensions, s); err != nil {
 		return err
 	}
+	out.DefaultFlags = *(*map[string][]string)(unsafe.Pointer(&in.DefaultFlags))
 	return nil
 }
 
@@ -330,6 +331,7 @@ func autoConvert_api_Config_To_v1_Config(in *api.Config, out *Config, s conversi
 	if err := Convert_Map_string_To_runtime_Object_To_Slice_v1_NamedExtension(&in.Extensions, &out.Extensions, s); err != nil {
 		return err
 	}
+	out.DefaultFlags = *(*map[string][]string)(unsafe.Pointer(&in.DefaultFlags))
 	return nil
 }
 

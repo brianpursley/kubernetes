@@ -46,6 +46,9 @@ type Config struct {
 	Contexts []NamedContext `json:"contexts"`
 	// CurrentContext is the name of the context that you would like to use by default
 	CurrentContext string `json:"current-context"`
+	// DefaultFlags defines default flags for specific commands
+	// +optional
+	DefaultFlags map[string][]string `json:"default-flags,omitempty"`
 	// Extensions holds additional information. This is useful for extenders so that reads and writes don't clobber unknown fields
 	// +optional
 	Extensions []NamedExtension `json:"extensions,omitempty"`

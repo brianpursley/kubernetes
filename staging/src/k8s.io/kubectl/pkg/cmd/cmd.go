@@ -392,7 +392,27 @@ func NewKubectlCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 	cmds.AddCommand(apiresources.NewCmdAPIResources(f, ioStreams))
 	cmds.AddCommand(options.NewCmdOptions(ioStreams.Out))
 
+	setUserDefinedDefaultArgs(cmds)
+
 	return cmds
+}
+
+func setUserDefinedDefaultArgs(cmd *cobra.Command) {
+	oldPersistentPreRunE := cmd.PersistentPreRunE
+	cmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		config, err := clientcmd.NewDefaultPathOptions().GetStartingConfig()
+		if err != nil {
+			klog.Warning("Unable to load config")
+		}
+		if config != nil {
+			for k, v := range config.DefaultFlags {
+				if cmd.Name() == k {
+					cmd.ParseFlags(v)
+				}
+			}
+		}
+		return oldPersistentPreRunE(cmd, args)
+	}
 }
 
 // addCmdHeaderHooks performs updates on two hooks:

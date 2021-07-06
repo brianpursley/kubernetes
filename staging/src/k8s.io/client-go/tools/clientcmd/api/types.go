@@ -49,6 +49,9 @@ type Config struct {
 	Contexts map[string]*Context `json:"contexts"`
 	// CurrentContext is the name of the context that you would like to use by default
 	CurrentContext string `json:"current-context"`
+	// DefaultFlags defines default flags for specific commands
+	// +optional
+	DefaultFlags map[string][]string `json:"default-flags,omitempty"`
 	// Extensions holds additional information. This is useful for extenders so that reads and writes don't clobber unknown fields
 	// +optional
 	Extensions map[string]runtime.Object `json:"extensions,omitempty"`
@@ -331,11 +334,12 @@ const (
 // NewConfig is a convenience function that returns a new Config object with non-nil maps
 func NewConfig() *Config {
 	return &Config{
-		Preferences: *NewPreferences(),
-		Clusters:    make(map[string]*Cluster),
-		AuthInfos:   make(map[string]*AuthInfo),
-		Contexts:    make(map[string]*Context),
-		Extensions:  make(map[string]runtime.Object),
+		Preferences:  *NewPreferences(),
+		Clusters:     make(map[string]*Cluster),
+		AuthInfos:    make(map[string]*AuthInfo),
+		Contexts:     make(map[string]*Context),
+		DefaultFlags: make(map[string][]string),
+		Extensions:   make(map[string]runtime.Object),
 	}
 }
 
