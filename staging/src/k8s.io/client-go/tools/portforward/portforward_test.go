@@ -17,7 +17,10 @@ limitations under the License.
 package portforward
 
 import (
+	"bytes"
 	"fmt"
+	"github.com/stretchr/testify/assert"
+	v1 "k8s.io/api/core/v1"
 	"net"
 	"net/http"
 	"os"
@@ -43,18 +46,29 @@ func (d *fakeDialer) Dial(protocols ...string) (httpstream.Connection, string, e
 }
 
 type fakeConnection struct {
-	closed    bool
-	closeChan chan bool
+	closed      bool
+	closeChan   chan bool
+	dataStream  *fakeStream
+	errorStream *fakeStream
 }
 
-func newFakeConnection() httpstream.Connection {
+func newFakeConnection() *fakeConnection {
 	return &fakeConnection{
-		closeChan: make(chan bool),
+		closeChan:   make(chan bool),
+		dataStream:  &fakeStream{},
+		errorStream: &fakeStream{},
 	}
 }
 
 func (c *fakeConnection) CreateStream(headers http.Header) (httpstream.Stream, error) {
-	return nil, nil
+	switch headers.Get(v1.StreamType) {
+	case v1.StreamTypeData:
+		return c.dataStream, nil
+	case v1.StreamTypeError:
+		return c.errorStream, nil
+	default:
+		return nil, fmt.Errorf("fakeStream creation not supported for stream type %s", headers.Get(v1.StreamType))
+	}
 }
 
 func (c *fakeConnection) Close() error {
@@ -75,6 +89,33 @@ func (c *fakeConnection) RemoveStreams(_ ...httpstream.Stream) {
 func (c *fakeConnection) SetIdleTimeout(timeout time.Duration) {
 	// no-op
 }
+
+type fakeStream struct {
+	headers   http.Header
+	readFunc  func(p []byte) (int, error)
+	writeFunc func(p []byte) (int, error)
+}
+
+func (s *fakeStream) Read(p []byte) (n int, err error)  { return s.readFunc(p) }
+func (s *fakeStream) Write(p []byte) (n int, err error) { return s.writeFunc(p) }
+func (*fakeStream) Close() error                        { return nil }
+func (*fakeStream) Reset() error                        { return nil }
+func (s *fakeStream) Headers() http.Header              { return s.headers }
+func (*fakeStream) Identifier() uint32                  { return 0 }
+
+type fakeConn struct {
+	readFunc  func(p []byte) (int, error)
+	writeFunc func(p []byte) (int, error)
+}
+
+func (f fakeConn) Read(p []byte) (int, error)       { return f.readFunc(p) }
+func (f fakeConn) Write(p []byte) (int, error)      { return f.writeFunc(p) }
+func (fakeConn) Close() error                       { return nil }
+func (fakeConn) LocalAddr() net.Addr                { return nil }
+func (fakeConn) RemoteAddr() net.Addr               { return nil }
+func (fakeConn) SetDeadline(t time.Time) error      { return nil }
+func (fakeConn) SetReadDeadline(t time.Time) error  { return nil }
+func (fakeConn) SetWriteDeadline(t time.Time) error { return nil }
 
 func TestParsePortsAndNew(t *testing.T) {
 	tests := []struct {
@@ -392,4 +433,96 @@ func TestGetPortsReturnsDynamicallyAssignedLocalPort(t *testing.T) {
 	if port.Local == 0 {
 		t.Fatalf("local port is 0, expected != 0")
 	}
+}
+
+func TestHandleConnection(t *testing.T) {
+	out := bytes.NewBufferString("")
+
+	pf, err := New(&fakeDialer{}, []string{":2222"}, nil, nil, out, nil)
+	if err != nil {
+		t.Fatalf("error while calling New: %s", err)
+	}
+
+	// Setup fake local connection
+	localDataToSend := bytes.NewBufferString("test data from local")
+	localDataReceived := bytes.NewBufferString("")
+	localConnection := &fakeConn{
+		readFunc:  localDataToSend.Read,
+		writeFunc: localDataReceived.Write,
+	}
+
+	// Setup fake remote connection to send data on the data stream after it receives data from the local connection
+	remoteDataToSend := bytes.NewBufferString("test data from remote")
+	remoteDataReceived := bytes.NewBufferString("")
+	remoteErrorToSend := bytes.NewBufferString("")
+	blockRemoteSend := make(chan struct{})
+	remoteConnection := newFakeConnection()
+	remoteConnection.dataStream.readFunc = func(p []byte) (int, error) {
+		<-blockRemoteSend // Wait for the expected data to be received before responding
+		return remoteDataToSend.Read(p)
+	}
+	remoteConnection.dataStream.writeFunc = func(p []byte) (int, error) {
+		n, err := remoteDataReceived.Write(p)
+		if remoteDataReceived.String() == "test data from local" {
+			close(blockRemoteSend)
+		}
+		return n, err
+	}
+	remoteConnection.errorStream.readFunc = remoteErrorToSend.Read
+	pf.streamConn = remoteConnection
+
+	// Test handleConnection
+	pf.handleConnection(localConnection, ForwardedPort{Local: 1111, Remote: 2222})
+
+	// Make sure nothing is on the error chan
+	select {
+	case err = <-pf.errorChan:
+		t.Fatalf("unexpected error: %s", err)
+	default:
+	}
+
+	// Make sure remote connection received data that was sent by the local connection
+	assert.Equal(t, "test data from local", remoteDataReceived.String())
+
+	// Make sure local connection received data that was sent by the remote connection
+	assert.Equal(t, "test data from remote", localDataReceived.String())
+
+	// Check output message
+	assert.Equal(t, "Handling connection for 1111\n", out.String())
+}
+
+func TestHandleConnectionSendsRemoteErrorStreamContentToErrorChan(t *testing.T) {
+	out := bytes.NewBufferString("")
+
+	pf, err := New(&fakeDialer{}, []string{":2222"}, nil, nil, out, nil)
+	if err != nil {
+		t.Fatalf("error while calling New: %s", err)
+	}
+
+	// Setup fake local connection
+	localDataToSend := bytes.NewBufferString("")
+	localDataReceived := bytes.NewBufferString("")
+	localConnection := &fakeConn{
+		readFunc:  localDataToSend.Read,
+		writeFunc: localDataReceived.Write,
+	}
+
+	// Setup fake remote connection to return an error message on the error stream
+	remoteDataToSend := bytes.NewBufferString("")
+	remoteDataReceived := bytes.NewBufferString("")
+	remoteErrorToSend := bytes.NewBufferString("test error from remote")
+	remoteConnection := newFakeConnection()
+	remoteConnection.dataStream.readFunc = remoteDataToSend.Read
+	remoteConnection.dataStream.writeFunc = remoteDataReceived.Write
+	remoteConnection.errorStream.readFunc = remoteErrorToSend.Read
+	pf.streamConn = remoteConnection
+
+	// Test handleConnection, using go-routine because it needs to be able to write to unbuffered pf.errorChan
+	go pf.handleConnection(localConnection, ForwardedPort{Local: 1111, Remote: 2222})
+
+	err = <-pf.errorChan
+	assert.Equal(t, "an error occurred forwarding 1111 -> 2222: test error from remote", err.Error())
+
+	// Check output message
+	assert.Equal(t, "Handling connection for 1111\n", out.String())
 }

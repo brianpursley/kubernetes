@@ -52,6 +52,7 @@ type PortForwarder struct {
 	requestID     int
 	out           io.Writer
 	errOut        io.Writer
+	errorChan     chan error
 }
 
 // ForwardedPort contains a Local:Remote port pairing.
@@ -180,6 +181,7 @@ func NewOnAddresses(dialer httpstream.Dialer, addresses []string, ports []string
 		Ready:     readyChan,
 		out:       out,
 		errOut:    errOut,
+		errorChan: make(chan error),
 	}, nil
 }
 
@@ -231,6 +233,8 @@ func (pf *PortForwarder) forward() error {
 	case <-pf.stopChan:
 	case <-pf.streamConn.CloseChan():
 		runtime.HandleError(errors.New("lost connection to pod"))
+	case err := <-pf.errorChan:
+		return err
 	}
 
 	return nil
@@ -398,6 +402,9 @@ func (pf *PortForwarder) handleConnection(conn net.Conn, port ForwardedPort) {
 	err = <-errorChan
 	if err != nil {
 		runtime.HandleError(err)
+
+		// write err to pf.errorChan, so forward() can return the error
+		pf.errorChan <- err
 	}
 }
 
