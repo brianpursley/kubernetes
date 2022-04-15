@@ -19,9 +19,9 @@ package portforward
 import (
 	"context"
 	"fmt"
-	"k8s.io/apimachinery/pkg/util/httpstream"
-	"k8s.io/client-go/tools/portforward2"
+	"k8s.io/client-go/tools/portforward"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -47,14 +47,16 @@ import (
 
 // PortForwardOptions contains all the options for running the port-forward cli command.
 type PortForwardOptions struct {
-	Namespace  string
-	PodName    string
-	RESTClient *restclient.RESTClient
-	Config     *restclient.Config
-	PodClient  corev1client.PodsGetter
-	Address    []string
-	Ports      []string
-	genericclioptions.IOStreams
+	Namespace     string
+	PodName       string
+	RESTClient    *restclient.RESTClient
+	Config        *restclient.Config
+	PodClient     corev1client.PodsGetter
+	Address       []string
+	Ports         []string
+	PortForwarder portForwarder
+	StopChannel   chan struct{}
+	ReadyChannel  chan struct{}
 }
 
 var (
@@ -96,7 +98,11 @@ const (
 )
 
 func NewCmdPortForward(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Command {
-	opts := &PortForwardOptions{IOStreams: streams}
+	opts := &PortForwardOptions{
+		PortForwarder: &defaultPortForwarder{
+			IOStreams: streams,
+		},
+	}
 	cmd := &cobra.Command{
 		Use:                   "port-forward TYPE/NAME [options] [LOCAL_PORT:]REMOTE_PORT [...[LOCAL_PORT_N:]REMOTE_PORT_N]",
 		DisableFlagsInUseLine: true,
@@ -114,6 +120,27 @@ func NewCmdPortForward(f cmdutil.Factory, streams genericclioptions.IOStreams) *
 	cmd.Flags().StringSliceVar(&opts.Address, "address", []string{"localhost"}, "Addresses to listen on (comma separated). Only accepts IP addresses or localhost as a value. When localhost is supplied, kubectl will try to bind on both 127.0.0.1 and ::1 and will fail if neither of these addresses are available to bind.")
 	// TODO support UID
 	return cmd
+}
+
+type portForwarder interface {
+	ForwardPorts(method string, url *url.URL, opts PortForwardOptions) error
+}
+
+type defaultPortForwarder struct {
+	genericclioptions.IOStreams
+}
+
+func (f *defaultPortForwarder) ForwardPorts(method string, url *url.URL, opts PortForwardOptions) error {
+	transport, upgrader, err := spdy.RoundTripperFor(opts.Config)
+	if err != nil {
+		return err
+	}
+	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, method, url)
+	fw, err := portforward.NewOnAddresses(dialer, opts.Address, opts.Ports, opts.StopChannel, opts.ReadyChannel, f.Out, f.ErrOut)
+	if err != nil {
+		return err
+	}
+	return fw.ForwardPorts()
 }
 
 // splitPort splits port string which is in form of [LOCAL PORT]:REMOTE PORT
@@ -336,6 +363,8 @@ func (o *PortForwardOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, arg
 		return err
 	}
 
+	o.StopChannel = make(chan struct{}, 1)
+	o.ReadyChannel = make(chan struct{})
 	return nil
 }
 
@@ -349,34 +378,33 @@ func (o PortForwardOptions) Validate() error {
 		return fmt.Errorf("at least 1 PORT is required for port-forward")
 	}
 
-	if o.PodClient == nil || o.RESTClient == nil || o.Config == nil {
-		return fmt.Errorf("client, client config, and restClient must be provided")
+	if o.PortForwarder == nil || o.PodClient == nil || o.RESTClient == nil || o.Config == nil {
+		return fmt.Errorf("client, client config, restClient, and portforwarder must be provided")
 	}
 	return nil
 }
 
 // RunPortForward implements all the necessary functionality for port-forward cmd.
 func (o PortForwardOptions) RunPortForward() error {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-	fw := portforward2.NewOnAddresses(o, o.Address, o.Ports, o.Out, o.ErrOut)
-	return fw.ForwardPorts(ctx)
-}
-
-func (o PortForwardOptions) Dial(protocols ...string) (httpstream.Connection, string, error) {
 	pod, err := o.PodClient.Pods(o.Namespace).Get(context.TODO(), o.PodName, metav1.GetOptions{})
 	if err != nil {
-		return nil, "", err
+		return err
 	}
 
 	if pod.Status.Phase != corev1.PodRunning {
-		return nil, "", fmt.Errorf("unable to forward port because pod is not running. Current status=%v", pod.Status.Phase)
+		return fmt.Errorf("unable to forward port because pod is not running. Current status=%v", pod.Status.Phase)
 	}
 
-	transport, upgrader, err := spdy.RoundTripperFor(o.Config)
-	if err != nil {
-		return nil, "", err
-	}
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt)
+	defer signal.Stop(signals)
+
+	go func() {
+		<-signals
+		if o.StopChannel != nil {
+			close(o.StopChannel)
+		}
+	}()
 
 	req := o.RESTClient.Post().
 		Resource("pods").
@@ -384,6 +412,5 @@ func (o PortForwardOptions) Dial(protocols ...string) (httpstream.Connection, st
 		Name(pod.Name).
 		SubResource("portforward")
 
-	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, "POST", req.URL())
-	return dialer.Dial(protocols...)
+	return o.PortForwarder.ForwardPorts("POST", req.URL(), o)
 }

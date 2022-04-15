@@ -45,14 +45,15 @@ type PortForwarder struct {
 	ports     []ForwardedPort
 	stopChan  <-chan struct{}
 
-	dialer        httpstream.Dialer
-	streamConn    httpstream.Connection
-	listeners     []io.Closer
-	Ready         chan struct{}
-	requestIDLock sync.Mutex
-	requestID     int
-	out           io.Writer
-	errOut        io.Writer
+	dialer            httpstream.Dialer
+	remoteConnection  httpstream.Connection
+	activeConnections sync.WaitGroup
+	listeners         []net.Listener
+	Ready             chan struct{}
+	requestIDLock     sync.Mutex
+	requestID         int
+	out               io.Writer
+	errOut            io.Writer
 }
 
 // ForwardedPort contains a Local:Remote port pairing.
@@ -184,26 +185,18 @@ func NewOnAddresses(dialer httpstream.Dialer, addresses []string, ports []string
 	}, nil
 }
 
-// ForwardPorts formats and executes a port forwarding request. The connection will remain
-// open until stopChan is closed.
+// ForwardPorts formats and executes a port forwarding request.
 func (pf *PortForwarder) ForwardPorts() error {
 	defer pf.Close()
 
 	var err error
-	pf.streamConn, _, err = pf.dialer.Dial(PortForwardProtocolV1Name)
+
+	// Establish the remote connection
+	pf.remoteConnection, _, err = pf.dialer.Dial(PortForwardProtocolV1Name)
 	if err != nil {
-		return fmt.Errorf("error upgrading connection: %s", err)
+		return err
 	}
-	defer pf.streamConn.Close()
-
-	return pf.forward()
-}
-
-// forward dials the remote host specific in req, upgrades the request, starts
-// listeners for each port specified in ports, and forwards local connections
-// to the remote host via streams.
-func (pf *PortForwarder) forward() error {
-	var err error
+	defer pf.remoteConnection.Close()
 
 	listenSuccess := false
 	for i := range pf.ports {
@@ -227,12 +220,8 @@ func (pf *PortForwarder) forward() error {
 		close(pf.Ready)
 	}
 
-	// wait for interrupt or conn closure
-	select {
-	case <-pf.stopChan:
-	case <-pf.streamConn.CloseChan():
-		runtime.HandleError(errors.New("lost connection to pod"))
-	}
+	// wait for interrupt
+	<-pf.stopChan
 
 	return nil
 }
@@ -285,7 +274,9 @@ func (pf *PortForwarder) getListener(protocol string, hostname string, port *For
 	localPortUInt, err := strconv.ParseUint(localPort, 10, 16)
 
 	if err != nil {
-		fmt.Fprintf(pf.out, "Failed to forward from %s:%d -> %d\n", hostname, localPortUInt, port.Remote)
+		if pf.errOut != nil {
+			fmt.Fprintf(pf.errOut, "Failed to forward from %s:%d -> %d\n", hostname, localPortUInt, port.Remote)
+		}
 		return nil, fmt.Errorf("error parsing local port: %s from %s (%s)", err, listenerAddress, host)
 	}
 	port.Local = uint16(localPortUInt)
@@ -301,16 +292,18 @@ func (pf *PortForwarder) getListener(protocol string, hostname string, port *For
 func (pf *PortForwarder) waitForConnection(listener net.Listener, port ForwardedPort) {
 	for {
 		select {
-		case <-pf.streamConn.CloseChan():
+		case <-pf.stopChan:
 			return
 		default:
 			conn, err := listener.Accept()
 			if err != nil {
-				// TODO consider using something like https://github.com/hydrogen18/stoppableListener?
+				if err.Error() == "listener closed" {
+					return
+				}
 				if !strings.Contains(strings.ToLower(err.Error()), "use of closed network connection") {
 					runtime.HandleError(fmt.Errorf("error accepting connection on port %d: %v", port.Local, err))
 				}
-				return
+				continue
 			}
 			go pf.handleConnection(conn, port)
 		}
@@ -327,8 +320,11 @@ func (pf *PortForwarder) nextRequestID() int {
 
 // handleConnection copies data between the local connection and the stream to
 // the remote server.
-func (pf *PortForwarder) handleConnection(conn net.Conn, port ForwardedPort) {
-	defer conn.Close()
+func (pf *PortForwarder) handleConnection(localConn net.Conn, port ForwardedPort) {
+	defer localConn.Close()
+
+	pf.activeConnections.Add(1)
+	defer pf.activeConnections.Done()
 
 	if pf.out != nil {
 		fmt.Fprintf(pf.out, "Handling connection for %d\n", port.Local)
@@ -336,12 +332,20 @@ func (pf *PortForwarder) handleConnection(conn net.Conn, port ForwardedPort) {
 
 	requestID := pf.nextRequestID()
 
+	//// Establish the remote connection
+	//remoteConnection, _, err := pf.dialer.Dial(PortForwardProtocolV1Name)
+	//if err != nil {
+	//	runtime.HandleError(fmt.Errorf("error establishing remote connection: %v", err))
+	//	return
+	//}
+	//defer remoteConnection.Close()
+
 	// create error stream
 	headers := http.Header{}
 	headers.Set(v1.StreamType, v1.StreamTypeError)
 	headers.Set(v1.PortHeader, fmt.Sprintf("%d", port.Remote))
 	headers.Set(v1.PortForwardRequestIDHeader, strconv.Itoa(requestID))
-	errorStream, err := pf.streamConn.CreateStream(headers)
+	errorStream, err := pf.remoteConnection.CreateStream(headers)
 	if err != nil {
 		runtime.HandleError(fmt.Errorf("error creating error stream for port %d -> %d: %v", port.Local, port.Remote, err))
 		return
@@ -363,7 +367,7 @@ func (pf *PortForwarder) handleConnection(conn net.Conn, port ForwardedPort) {
 
 	// create data stream
 	headers.Set(v1.StreamType, v1.StreamTypeData)
-	dataStream, err := pf.streamConn.CreateStream(headers)
+	dataStream, err := pf.remoteConnection.CreateStream(headers)
 	if err != nil {
 		runtime.HandleError(fmt.Errorf("error creating forwarding stream for port %d -> %d: %v", port.Local, port.Remote, err))
 		return
@@ -374,7 +378,8 @@ func (pf *PortForwarder) handleConnection(conn net.Conn, port ForwardedPort) {
 
 	go func() {
 		// Copy from the remote side to the local port.
-		if _, err := io.Copy(conn, dataStream); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+		_, err := io.Copy(localConn, dataStream)
+		if err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
 			runtime.HandleError(fmt.Errorf("error copying from remote stream to local connection: %v", err))
 		}
 
@@ -387,7 +392,7 @@ func (pf *PortForwarder) handleConnection(conn net.Conn, port ForwardedPort) {
 		defer dataStream.Close()
 
 		// Copy from the local port to the remote side.
-		if _, err := io.Copy(dataStream, conn); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
+		if _, err := io.Copy(dataStream, localConn); err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
 			runtime.HandleError(fmt.Errorf("error copying from local connection to remote stream: %v", err))
 			// break out of the select below without waiting for the other copy to finish
 			close(localError)
@@ -396,6 +401,8 @@ func (pf *PortForwarder) handleConnection(conn net.Conn, port ForwardedPort) {
 
 	// wait for either a local->remote error or for copying from remote->local to finish
 	select {
+	case <-pf.stopChan:
+		dataStream.Reset() // Reset data stream to unblock io.Copy
 	case <-remoteDone:
 	case <-localError:
 	}
@@ -404,7 +411,7 @@ func (pf *PortForwarder) handleConnection(conn net.Conn, port ForwardedPort) {
 	err = <-errorChan
 	if err != nil {
 		runtime.HandleError(err)
-		pf.streamConn.Close()
+		pf.remoteConnection = nil
 	}
 }
 
@@ -416,6 +423,8 @@ func (pf *PortForwarder) Close() {
 			runtime.HandleError(fmt.Errorf("error closing listener: %v", err))
 		}
 	}
+	// wait for all active connections to complete
+	pf.activeConnections.Wait()
 }
 
 // GetPorts will return the ports that were forwarded; this can be used to

@@ -25,6 +25,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -471,7 +472,8 @@ func TestGetPortsReturnsDynamicallyAssignedLocalPort(t *testing.T) {
 func TestHandleConnection(t *testing.T) {
 	out := bytes.NewBufferString("")
 
-	pf, err := New(&fakeDialer{}, []string{":2222"}, nil, nil, out, nil)
+	dialer := &fakeDialer{}
+	pf, err := New(dialer, []string{":2222"}, nil, nil, out, nil)
 	if err != nil {
 		t.Fatalf("error while calling New: %s", err)
 	}
@@ -500,7 +502,7 @@ func TestHandleConnection(t *testing.T) {
 		return n, err
 	}
 	remoteConnection.errorStream.readFunc = remoteErrorToSend.Read
-	pf.streamConn = remoteConnection
+	dialer.conn = remoteConnection
 
 	// Test handleConnection
 	pf.handleConnection(localConnection, ForwardedPort{Local: 1111, Remote: 2222})
@@ -514,7 +516,8 @@ func TestHandleConnectionSendsRemoteError(t *testing.T) {
 	out := bytes.NewBufferString("")
 	errOut := bytes.NewBufferString("")
 
-	pf, err := New(&fakeDialer{}, []string{":2222"}, nil, nil, out, errOut)
+	dialer := &fakeDialer{}
+	pf, err := New(dialer, []string{":2222"}, nil, nil, out, errOut)
 	if err != nil {
 		t.Fatalf("error while calling New: %s", err)
 	}
@@ -533,7 +536,7 @@ func TestHandleConnectionSendsRemoteError(t *testing.T) {
 	remoteConnection.dataStream.readFunc = remoteDataToSend.Read
 	remoteConnection.dataStream.writeFunc = remoteDataReceived.Write
 	remoteConnection.errorStream.readFunc = remoteErrorToSend.Read
-	pf.streamConn = remoteConnection
+	dialer.conn = remoteConnection
 
 	// Test handleConnection, using go-routine because it needs to be able to write to unbuffered pf.errorChan
 	pf.handleConnection(localConnection, ForwardedPort{Local: 1111, Remote: 2222})
@@ -543,20 +546,28 @@ func TestHandleConnectionSendsRemoteError(t *testing.T) {
 	assert.Equal(t, "Handling connection for 1111\n", out.String())
 }
 
-func TestWaitForConnectionExitsOnStreamConnClosed(t *testing.T) {
+func TestWaitForConnectionExitsOnListenerClosed(t *testing.T) {
 	out := bytes.NewBufferString("")
 	errOut := bytes.NewBufferString("")
 
-	pf, err := New(&fakeDialer{}, []string{":2222"}, nil, nil, out, errOut)
+	dialer := &fakeDialer{conn: newFakeConnection()}
+	dialer.conn.Close()
+	stopChan := make(chan struct{})
+
+	pf, err := New(dialer, []string{":2222"}, stopChan, nil, out, errOut)
 	if err != nil {
 		t.Fatalf("error while calling New: %s", err)
 	}
 
 	listener := newFakeListener()
 
-	pf.streamConn = newFakeConnection()
-	pf.streamConn.Close()
+	wg := sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		pf.waitForConnection(&listener, ForwardedPort{})
+		wg.Done()
+	}()
 
-	port := ForwardedPort{}
-	pf.waitForConnection(&listener, port)
+	listener.Close()
+	wg.Wait()
 }
