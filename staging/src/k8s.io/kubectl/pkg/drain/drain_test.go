@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/kubernetes/fake"
 	ktest "k8s.io/client-go/testing"
 )
@@ -223,7 +224,7 @@ func addCoreNonEvictionSupport(t *testing.T, k *fake.Clientset) {
 }
 
 // addEvictionSupport implements simple fake eviction support on the fake.Clientset
-func addEvictionSupport(t *testing.T, k *fake.Clientset, version string) {
+func addEvictionSupport(t *testing.T, k *fake.Clientset, version string, fakeErrors []error) {
 	podsEviction := metav1.APIResource{
 		Name:    "pods/eviction",
 		Kind:    "Eviction",
@@ -244,6 +245,13 @@ func addEvictionSupport(t *testing.T, k *fake.Clientset, version string) {
 	k.PrependReactor("create", "pods", func(action ktest.Action) (bool, runtime.Object, error) {
 		if action.GetSubresource() != "eviction" {
 			return false, nil, nil
+		}
+
+		// If there are any fake errors, pop the first one and return it
+		if len(fakeErrors) > 0 {
+			fakeError := fakeErrors[0]
+			fakeErrors = fakeErrors[1:]
+			return true, nil, fakeError
 		}
 
 		namespace := ""
@@ -279,7 +287,7 @@ func TestCheckEvictionSupport(t *testing.T) {
 			func(t *testing.T) {
 				k := fake.NewSimpleClientset()
 				if len(evictionVersion) > 0 {
-					addEvictionSupport(t, k, evictionVersion)
+					addEvictionSupport(t, k, evictionVersion, []error{})
 				} else {
 					addCoreNonEvictionSupport(t, k)
 				}
@@ -299,7 +307,7 @@ func TestCheckEvictionSupport(t *testing.T) {
 	}
 }
 
-func TestDeleteOrEvict(t *testing.T) {
+func TestDeleteOrEvictPods(t *testing.T) {
 	tests := []struct {
 		description       string
 		evictionSupported bool
@@ -328,8 +336,10 @@ func TestDeleteOrEvict(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.description, func(t *testing.T) {
+			_, _, outBuf, errOutBuf := genericclioptions.NewTestIOStreams()
 			h := &Helper{
-				Out:                os.Stdout,
+				Out:                outBuf,
+				ErrOut:             errOutBuf,
 				GracePeriodSeconds: 10,
 			}
 
@@ -364,7 +374,7 @@ func TestDeleteOrEvict(t *testing.T) {
 			// Build the fake client
 			k := fake.NewSimpleClientset(create...)
 			if tc.evictionSupported {
-				addEvictionSupport(t, k, "v1")
+				addEvictionSupport(t, k, "v1", []error{})
 			} else {
 				addCoreNonEvictionSupport(t, k)
 			}
@@ -407,6 +417,126 @@ func TestDeleteOrEvict(t *testing.T) {
 			})
 			if !reflect.DeepEqual(actualEvictions, expectedEvictions) {
 				t.Errorf("%s: unexpected evictions; actual\n\t%v\nexpected\n\t%v", tc.description, actualEvictions, expectedEvictions)
+			}
+
+			// Check the output
+			actualOut := string(outBuf.Bytes())
+			if tc.evictionSupported && !tc.disableEviction {
+				if actualOut != "evicting pod default/mypod-1\nevicting pod default/mypod-2\n" &&
+					actualOut != "evicting pod default/mypod-2\nevicting pod default/mypod-1\n" {
+					t.Errorf("unexpected out: %s", actualOut)
+				}
+			} else if actualOut != "" {
+				t.Errorf("unexpected out: %s", actualOut)
+			}
+
+			// Check for errors written to errout
+			if errOutBuf.Len() > 0 {
+				t.Errorf("unexpected errout: %s", string(errOutBuf.Bytes()))
+			}
+		})
+	}
+}
+
+func TestDeleteOrEvictPodsErrorHandling(t *testing.T) {
+	retryDuration = 0 * time.Second // Set to 0s, so there the tests don't sleep
+	tests := []struct {
+		description    string
+		fakeErrors     []error
+		expectedOut    string
+		expectedErrOut string
+		expectedError  error
+	}{
+		{
+			description: "Too many requests",
+			fakeErrors: []error{
+				&apierrors.StatusError{ErrStatus: metav1.Status{
+					Reason:  metav1.StatusReasonTooManyRequests,
+					Message: "Too many requests",
+				}},
+			},
+			expectedOut:    "evicting pod default/mypod\nevicting pod default/mypod\n",
+			expectedErrOut: "error when evicting pods/\"mypod\" -n \"default\" (will retry after 0s): Too many requests\n",
+		},
+		{
+			description: "Forbidden with namespace terminating cause",
+			fakeErrors: []error{
+				&apierrors.StatusError{ErrStatus: metav1.Status{
+					Reason:  metav1.StatusReasonForbidden,
+					Message: "Forbidden",
+					Details: &metav1.StatusDetails{
+						Causes: []metav1.StatusCause{
+							{
+								Type: corev1.NamespaceTerminatingCause,
+							},
+						},
+					},
+				}},
+			},
+			expectedOut:    "evicting pod default/mypod\nevicting pod default/mypod\n",
+			expectedErrOut: "error when evicting pod \"mypod\" (will retry after 0s): Forbidden\n",
+		},
+		{
+			description: "Not Found",
+			fakeErrors: []error{
+				&apierrors.StatusError{ErrStatus: metav1.Status{
+					Reason:  metav1.StatusReasonNotFound,
+					Message: "Not Found",
+				}},
+			},
+			expectedOut:    "evicting pod default/mypod\n",
+			expectedErrOut: "",
+		},
+		{
+			description: "Internal Error",
+			fakeErrors: []error{
+				&apierrors.StatusError{ErrStatus: metav1.Status{
+					Reason:  metav1.StatusReasonInternalError,
+					Message: "Internal Error",
+				}},
+			},
+			expectedOut:    "evicting pod default/mypod\n",
+			expectedErrOut: "",
+			expectedError:  fmt.Errorf(`error when evicting pods/"mypod" -n "default": Internal Error`),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.description, func(t *testing.T) {
+			_, _, outBuf, errOutBuf := genericclioptions.NewTestIOStreams()
+			h := &Helper{
+				Out:                outBuf,
+				ErrOut:             errOutBuf,
+				GracePeriodSeconds: 10,
+			}
+
+			// Create a pod
+			pod := &corev1.Pod{}
+			pod.Name = "mypod"
+			pod.Namespace = "default"
+
+			// Build the fake client
+			k := fake.NewSimpleClientset(pod)
+			addEvictionSupport(t, k, "v1", tc.fakeErrors)
+			h.Client = k
+
+			// Do the eviction
+			err := h.DeleteOrEvictPods([]corev1.Pod{*pod})
+			if tc.expectedError != nil {
+				if err == nil || err.Error() != tc.expectedError.Error() {
+					t.Fatalf("unexpected error:\nexpected: %s\ngot: %s", tc.expectedError, err)
+				}
+			} else if err != nil {
+				t.Fatalf("error from DeleteOrEvictPods: %v", err)
+			}
+
+			// Check the output
+			if string(outBuf.Bytes()) != tc.expectedOut {
+				t.Errorf("unexpected out:\nexpected: %s\ngot: %s", tc.expectedOut, string(outBuf.Bytes()))
+			}
+
+			// Check for errors written to errout
+			if string(errOutBuf.Bytes()) != tc.expectedErrOut {
+				t.Errorf("unexpected errout:\nexpected: %s\ngot: %s", tc.expectedErrOut, string(errOutBuf.Bytes()))
 			}
 		})
 	}
