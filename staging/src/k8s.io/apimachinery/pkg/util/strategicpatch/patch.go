@@ -1185,7 +1185,7 @@ func mergePatchIntoOriginal(original, patch map[string]interface{}, schema Looku
 			merged = patchFieldValue
 		case foundOriginal && foundPatch:
 			merged, err = mergeSliceHandler(originalList, patchList, subschema,
-				patchStrategy, patchMeta.GetPatchMergeKey(), false, mergeOptions)
+				patchStrategy, patchMeta.GetPatchMergeKey(), mergeOptions)
 			if err != nil {
 				return err
 			}
@@ -1362,15 +1362,19 @@ func mergeMap(original, patch map[string]interface{}, schema LookupPatchMeta, me
 			}
 			original[k], err = mergeMapHandler(original[k], patchV, subschema, patchStrategy, mergeOptions)
 		case reflect.Slice:
-			subschema, patchMeta, err2 := schema.LookupPatchMetadataForSlice(k)
-			if err2 != nil {
-				return nil, err2
+			if mergeOptions.MergeParallelList && isDeleteList {
+				original[k], err = deleteFromSliceHandler(original[k], patchV)
+			} else {
+				subschema, patchMeta, err2 := schema.LookupPatchMetadataForSlice(k)
+				if err2 != nil {
+					return nil, err2
+				}
+				_, patchStrategy, err2 := extractRetainKeysPatchStrategy(patchMeta.GetPatchStrategies())
+				if err2 != nil {
+					return nil, err2
+				}
+				original[k], err = mergeSliceHandler(original[k], patchV, subschema, patchStrategy, patchMeta.GetPatchMergeKey(), mergeOptions)
 			}
-			_, patchStrategy, err2 := extractRetainKeysPatchStrategy(patchMeta.GetPatchStrategies())
-			if err2 != nil {
-				return nil, err2
-			}
-			original[k], err = mergeSliceHandler(original[k], patchV, subschema, patchStrategy, patchMeta.GetPatchMergeKey(), isDeleteList, mergeOptions)
 		default:
 			original[k] = patchV
 		}
@@ -1416,18 +1420,48 @@ func mergeMapHandler(original, patch interface{}, schema LookupPatchMeta,
 	}
 }
 
-// mergeSliceHandler handles how to merge `patchV` whose key is `key` with `original` respecting
-// fieldPatchStrategy, fieldPatchMergeKey, isDeleteList and mergeOptions.
-func mergeSliceHandler(original, patch interface{}, schema LookupPatchMeta,
-	fieldPatchStrategy, fieldPatchMergeKey string, isDeleteList bool, mergeOptions MergeOptions) ([]interface{}, error) {
+// deleteFromSliceHandler handles deleting items from a slice.
+func deleteFromSliceHandler(original, patch interface{}) ([]interface{}, error) {
 	typedOriginal, typedPatch, err := sliceTypeAssertion(original, patch)
 	if err != nil {
 		return nil, err
 	}
 
-	// Delete lists are handled the same way regardless of what the field's patch strategy is
-	if fieldPatchStrategy == mergeDirective || isDeleteList {
-		return mergeSlice(typedOriginal, typedPatch, schema, fieldPatchMergeKey, mergeOptions, isDeleteList)
+	// All the values must be of the same type, but not a list.
+	t, err := sliceElementType(typedOriginal, typedPatch)
+	if err != nil {
+		return nil, err
+	}
+
+	kind := t.Kind()
+	if kind == reflect.Map {
+		return nil, fmt.Errorf("invalid use of $deleteFromPrimitiveList directive on map elements")
+	}
+
+	toDeleteMap := map[interface{}]interface{}{}
+	processed := make([]interface{}, 0, len(typedOriginal))
+	for _, v := range typedPatch {
+		toDeleteMap[v] = true
+	}
+	for _, v := range typedOriginal {
+		if _, found := toDeleteMap[v]; !found {
+			processed = append(processed, v)
+		}
+	}
+	return processed, nil
+}
+
+// mergeSliceHandler handles how to merge `patchV` whose key is `key` with `original` respecting
+// fieldPatchStrategy, fieldPatchMergeKey and mergeOptions.
+func mergeSliceHandler(original, patch interface{}, schema LookupPatchMeta,
+	fieldPatchStrategy, fieldPatchMergeKey string, mergeOptions MergeOptions) ([]interface{}, error) {
+	typedOriginal, typedPatch, err := sliceTypeAssertion(original, patch)
+	if err != nil {
+		return nil, err
+	}
+
+	if fieldPatchStrategy == mergeDirective {
+		return mergeSlice(typedOriginal, typedPatch, schema, fieldPatchMergeKey, mergeOptions)
 	} else {
 		return typedPatch, nil
 	}
@@ -1436,7 +1470,7 @@ func mergeSliceHandler(original, patch interface{}, schema LookupPatchMeta,
 // Merge two slices together. Note: This may modify both the original slice and
 // the patch because getting a deep copy of a slice in golang is highly
 // non-trivial.
-func mergeSlice(original, patch []interface{}, schema LookupPatchMeta, mergeKey string, mergeOptions MergeOptions, isDeleteList bool) ([]interface{}, error) {
+func mergeSlice(original, patch []interface{}, schema LookupPatchMeta, mergeKey string, mergeOptions MergeOptions) ([]interface{}, error) {
 	if len(original) == 0 && len(patch) == 0 {
 		return original, nil
 	}
@@ -1451,9 +1485,6 @@ func mergeSlice(original, patch []interface{}, schema LookupPatchMeta, mergeKey 
 	kind := t.Kind()
 	// If the elements are not maps, merge the slices of scalars.
 	if kind != reflect.Map {
-		if mergeOptions.MergeParallelList && isDeleteList {
-			return deleteFromSlice(original, patch), nil
-		}
 		// Maybe in the future add a "concat" mode that doesn't
 		// deduplicate.
 		both := append(original, patch...)
@@ -1577,21 +1608,6 @@ func mergeSliceWithoutSpecialElements(original, patch []interface{}, mergeKey st
 		}
 	}
 	return original, nil
-}
-
-// deleteFromSlice uses the parallel list to delete the items in a list of scalars
-func deleteFromSlice(current, toDelete []interface{}) []interface{} {
-	toDeleteMap := map[interface{}]interface{}{}
-	processed := make([]interface{}, 0, len(current))
-	for _, v := range toDelete {
-		toDeleteMap[v] = true
-	}
-	for _, v := range current {
-		if _, found := toDeleteMap[v]; !found {
-			processed = append(processed, v)
-		}
-	}
-	return processed
 }
 
 // This method no longer panics if any element of the slice is not a map.

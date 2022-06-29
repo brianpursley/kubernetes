@@ -760,6 +760,22 @@ nonMergingIntList:
 `),
 		},
 	},
+	{
+		Description: "$deleteFromPrimitiveList should return error if attempting to use with a non-primitive list",
+		StrategicMergePatchRawTestCaseData: StrategicMergePatchRawTestCaseData{
+			Original: []byte(`
+mergingList:
+  - name: foo
+  - name: bar
+  - name: baz
+`),
+			TwoWay: []byte(`
+$deleteFromPrimitiveList/mergingList:
+  - name: bar
+`),
+			ExpectedError: "invalid use of $deleteFromPrimitiveList directive on map elements",
+		},
+	},
 }
 
 func TestCustomStrategicMergePatch(t *testing.T) {
@@ -6949,5 +6965,58 @@ func TestUnknownField(t *testing.T) {
 				}
 			}()
 		}
+	}
+}
+
+func TestMergeStrategicMergeMapPatchUsingLookupPatchMeta(t *testing.T) {
+	schema := PatchMetaFromOpenAPI{
+		Schema: sptest.GetSchemaOrDie(&fakeMergeItemSchema, "mergeItem"),
+	}
+
+	patches := []JSONMap{
+		{"mergingIntList": []interface{}{1}},
+		{"mergingIntList": []interface{}{2}},
+		{"mergingIntList": []interface{}{1, 3, 4}},
+	}
+
+	// This merges multiple patches together
+	got, err := MergeStrategicMergeMapPatchUsingLookupPatchMeta(schema, patches...)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expected := JSONMap{"mergingIntList": []interface{}{2, 1, 3, 4}}
+
+	if !reflect.DeepEqual(got, expected) {
+		t.Fatalf("incorrect result\nexpected:\n%s\ngot:\n%s\n", mergepatch.ToYAMLOrError(expected), mergepatch.ToYAMLOrError(got))
+	}
+}
+
+func TestMergeStrategicMergeMapPatchUsingLookupPatchMetaShouldPreserveDeleteFromPrimitiveListDirective(t *testing.T) {
+	schema := PatchMetaFromOpenAPI{
+		Schema: sptest.GetSchemaOrDie(&fakeMergeItemSchema, "mergeItem"),
+	}
+
+	patches := []JSONMap{
+		{"mergingIntList": []interface{}{1}},
+		{"mergingIntList": []interface{}{2}},
+		{"$deleteFromPrimitiveList/mergingIntList": []interface{}{1}},
+	}
+
+	// This merges multiple patches together, preserving the $deleteFromPrimitiveList
+	// directive instead of performing the deletion
+	got, err := MergeStrategicMergeMapPatchUsingLookupPatchMeta(schema, patches...)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Make sure the $deleteFromPrimitiveList item is still there
+	expected := JSONMap{
+		"$deleteFromPrimitiveList/mergingIntList": []interface{}{1},
+		"mergingIntList": []interface{}{2, 1},
+	}
+
+	if !reflect.DeepEqual(got, expected) {
+		t.Fatalf("incorrect result\nexpected:\n%s\ngot:\n%s\n", mergepatch.ToYAMLOrError(expected), mergepatch.ToYAMLOrError(got))
 	}
 }
