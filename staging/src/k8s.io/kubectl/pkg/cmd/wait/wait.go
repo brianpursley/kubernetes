@@ -23,6 +23,7 @@ import (
 	"io"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -189,6 +190,9 @@ func (flags *WaitFlags) ToOptions(args []string) (*WaitOptions, error) {
 func conditionFuncFor(condition string, errOut io.Writer) (ConditionFunc, error) {
 	if strings.ToLower(condition) == "delete" {
 		return IsDeleted, nil
+	}
+	if strings.ToLower(condition) == "created" {
+		return IsCreated, nil
 	}
 	if strings.HasPrefix(condition, "condition=") {
 		conditionName := condition[len("condition="):]
@@ -401,6 +405,80 @@ func IsDeleted(info *resource.Info, o *WaitOptions) (runtime.Object, bool, error
 	return gottenObj, true, nil
 }
 
+// IsCreated is a condition func for waiting for something to be deleted
+func IsCreated(info *resource.Info, o *WaitOptions) (runtime.Object, bool, error) {
+	if len(info.Name) == 0 {
+		return info.Object, false, fmt.Errorf("resource name must be provided")
+	}
+
+	var gottenObj runtime.Object
+	gottenObj, initObjGetErr := o.DynamicClient.Resource(info.Mapping.Resource).Namespace(info.Namespace).Get(context.Background(), info.Name, metav1.GetOptions{})
+	if initObjGetErr != nil {
+		if !apierrors.IsNotFound(initObjGetErr) {
+			return info.Object, false, initObjGetErr
+		}
+	} else if gottenObj != nil {
+		// It already has been created, so return true
+		return gottenObj, true, nil
+	}
+
+	endTime := time.Now().Add(o.Timeout)
+	timeout := time.Until(endTime)
+	errWaitTimeoutWithName := extendErrWaitTimeout(wait.ErrWaitTimeout, info)
+	if timeout <= 0 {
+		return info.Object, false, errWaitTimeoutWithName
+	}
+
+	ctx, cancel := watchtools.ContextWithOptionalTimeout(context.Background(), o.Timeout)
+	defer cancel()
+
+	fieldSelector := fields.OneTermEqualSelector("metadata.name", info.Name).String()
+	lw := &cache.ListWatch{
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			options.FieldSelector = fieldSelector
+			return o.DynamicClient.Resource(info.Mapping.Resource).Namespace(info.Namespace).List(context.TODO(), options)
+		},
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			options.FieldSelector = fieldSelector
+			return o.DynamicClient.Resource(info.Mapping.Resource).Namespace(info.Namespace).Watch(context.TODO(), options)
+		},
+	}
+
+	// Mutex for synchronized writing of gottenObj
+	gottenObjSync := sync.Mutex{}
+
+	// this function is used to refresh the cache to prevent timeout waits on resources that have already been added
+	preconditionFunc := func(store cache.Store) (bool, error) {
+		item, exists, err := store.Get(&metav1.ObjectMeta{Namespace: info.Namespace, Name: info.Name})
+		if err != nil {
+			return true, err
+		}
+		if exists {
+			gottenObjSync.Lock()
+			defer gottenObjSync.Unlock()
+			gottenObj = item.(runtime.Object)
+		}
+		return exists, nil
+	}
+
+	intr := interrupt.New(nil, cancel)
+	err := intr.Run(func() error {
+		ev, err := watchtools.UntilWithSync(ctx, lw, &unstructured.Unstructured{}, preconditionFunc, Wait{errOut: o.ErrOut}.IsAdded)
+		gottenObjSync.Lock()
+		defer gottenObjSync.Unlock()
+		gottenObj = ev.Object
+		return err
+	})
+	if err != nil {
+		if err == wait.ErrWaitTimeout {
+			return gottenObj, false, errWaitTimeoutWithName
+		}
+		return gottenObj, false, err
+	}
+
+	return gottenObj, true, nil
+}
+
 // Wait has helper methods for handling watches, including error handling.
 type Wait struct {
 	errOut io.Writer
@@ -408,6 +486,16 @@ type Wait struct {
 
 // IsDeleted returns true if the object is deleted. It prints any errors it encounters.
 func (w Wait) IsDeleted(event watch.Event) (bool, error) {
+	return w.IsEventType(event, watch.Deleted)
+}
+
+// IsAdded returns true if the object is added. It prints any errors it encounters.
+func (w Wait) IsAdded(event watch.Event) (bool, error) {
+	return w.IsEventType(event, watch.Added)
+}
+
+// IsEventType returns true of the event matches the specified type and prints any errors it encounters.
+func (w Wait) IsEventType(event watch.Event, eventType watch.EventType) (bool, error) {
 	switch event.Type {
 	case watch.Error:
 		// keep waiting in the event we see an error - we expect the watch to be closed by
@@ -415,7 +503,7 @@ func (w Wait) IsDeleted(event watch.Event) (bool, error) {
 		err := apierrors.FromObject(event.Object)
 		fmt.Fprintf(w.errOut, "error: An error occurred while waiting for the object to be deleted: %v", err)
 		return false, nil
-	case watch.Deleted:
+	case eventType:
 		return true, nil
 	default:
 		return false, nil
