@@ -299,9 +299,9 @@ func TestParsePortsAndNew(t *testing.T) {
 
 		var pf *PortForwarder
 		if len(test.addresses) > 0 {
-			pf, err = NewOnAddresses(dialer, test.addresses, test.input, expectedStopChan, readyChan, os.Stdout, os.Stderr)
+			pf, err = NewOnAddresses(dialer, test.addresses, test.input, expectedStopChan, readyChan, os.Stdout, os.Stderr, false)
 		} else {
-			pf, err = New(dialer, test.input, expectedStopChan, readyChan, os.Stdout, os.Stderr)
+			pf, err = New(dialer, test.input, expectedStopChan, readyChan, os.Stdout, os.Stderr, false)
 		}
 		haveError = err != nil
 		if e, a := test.expectNewError, haveError; e != a {
@@ -446,7 +446,7 @@ func TestGetPortsReturnsDynamicallyAssignedLocalPort(t *testing.T) {
 		}
 	}()
 
-	pf, err := New(dialer, []string{":5000"}, stopChan, readyChan, os.Stdout, os.Stderr)
+	pf, err := New(dialer, []string{":5000"}, stopChan, readyChan, os.Stdout, os.Stderr, false)
 
 	if err != nil {
 		t.Fatalf("error while calling New: %s", err)
@@ -477,7 +477,7 @@ func TestGetPortsReturnsDynamicallyAssignedLocalPort(t *testing.T) {
 func TestHandleConnection(t *testing.T) {
 	out := bytes.NewBufferString("")
 
-	pf, err := New(&fakeDialer{}, []string{":2222"}, nil, nil, out, nil)
+	pf, err := New(&fakeDialer{}, []string{":2222"}, nil, nil, out, nil, false)
 	if err != nil {
 		t.Fatalf("error while calling New: %s", err)
 	}
@@ -520,7 +520,7 @@ func TestHandleConnectionSendsRemoteError(t *testing.T) {
 	out := bytes.NewBufferString("")
 	errOut := bytes.NewBufferString("")
 
-	pf, err := New(&fakeDialer{}, []string{":2222"}, nil, nil, out, errOut)
+	pf, err := New(&fakeDialer{}, []string{":2222"}, nil, nil, out, errOut, false)
 	if err != nil {
 		t.Fatalf("error while calling New: %s", err)
 	}
@@ -554,7 +554,7 @@ func TestWaitForConnectionExitsOnStreamConnClosed(t *testing.T) {
 	out := bytes.NewBufferString("")
 	errOut := bytes.NewBufferString("")
 
-	pf, err := New(&fakeDialer{}, []string{":2222"}, nil, nil, out, errOut)
+	pf, err := New(&fakeDialer{}, []string{":2222"}, nil, nil, out, errOut, false)
 	if err != nil {
 		t.Fatalf("error while calling New: %s", err)
 	}
