@@ -21,7 +21,7 @@ EOF
 docker build "$TEMP_DIR" -t delve-node-image
 rm -rf "$TEMP_DIR"
 
-# Create a cluster using our delve image
+# Create a cluster using our customized node image that has delve in it
 kind create cluster --image=delve-node-image:latest --config <(cat << EOF
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
@@ -39,6 +39,9 @@ cleanup() {
 }
 trap "cleanup" SIGINT
 
+# Delve attach exits after a debug session, so just keep running it for convenience until you press Ctrl+C
 while docker exec -it kind-control-plane /bin/sh -c \
   "dlv --listen=:$DLV_PORT --headless=true --api-version=2 attach \$(pidof ${DLV_TARGET})";
-do :; done
+do
+  echo "Re-running delve attach (Press Ctrl+C to exit)"
+done
