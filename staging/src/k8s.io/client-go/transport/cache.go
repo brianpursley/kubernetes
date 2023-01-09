@@ -101,10 +101,7 @@ func (c *tlsTransportCache) get(config *Config) (http.RoundTripper, error) {
 	if config.DialHolder != nil {
 		dial = config.DialHolder.Dial
 	} else {
-		dial = (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext
+		dial = NewDefaultDialContextFunc()
 	}
 
 	// If we use are reloading files, we need to handle certificate rotation properly

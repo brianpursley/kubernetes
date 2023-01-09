@@ -17,7 +17,9 @@ limitations under the License.
 package cmd
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -30,6 +32,7 @@ import (
 
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/transport"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/klog/v2"
 	"k8s.io/kubectl/pkg/cmd/annotate"
@@ -328,6 +331,7 @@ func NewKubectlCommand(o KubectlOptions) *cobra.Command {
 	matchVersionKubeConfigFlags.AddFlags(flags)
 	// Updates hooks to add kubectl command headers: SIG CLI KEP 859.
 	addCmdHeaderHooks(cmds, kubeConfigFlags)
+	addDialTimeoutRetry(kubeConfigFlags)
 
 	f := cmdutil.NewFactory(matchVersionKubeConfigFlags)
 
@@ -488,6 +492,33 @@ func addCmdHeaderHooks(cmds *cobra.Command, kubeConfigFlags *genericclioptions.C
 				Headers:  crt.Headers,
 			}
 		})
+		return c
+	}
+}
+
+func addDialTimeoutRetry(kubeConfigFlags *genericclioptions.ConfigFlags) {
+	// TODO: Feature gate needed?
+	existingWrapConfigFn := kubeConfigFlags.WrapConfigFn
+	kubeConfigFlags.WrapConfigFn = func(c *rest.Config) *rest.Config {
+		if existingWrapConfigFn != nil {
+			c = existingWrapConfigFn(c)
+		}
+		dial := c.Dial
+		if dial == nil {
+			dial = transport.NewDefaultDialContextFunc()
+		}
+		c.Dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+			retry := 0
+			for {
+				conn, err := dial(ctx, network, address)
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() && retry < 3 {
+					retry++
+					klog.V(1).Infof("a retryable dial error occurred: %v", err)
+					continue
+				}
+				return conn, err
+			}
+		}
 		return c
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"time"
 )
 
 // Config holds various options for establishing a transport.
@@ -82,6 +83,14 @@ type Config struct {
 // DialHolder is used to make the wrapped function comparable so that it can be used as a map key.
 type DialHolder struct {
 	Dial func(ctx context.Context, network, address string) (net.Conn, error)
+}
+
+// NewDefaultDialContextFunc returns the DialContext func for a default Dialer
+func NewDefaultDialContextFunc() func(ctx context.Context, network, address string) (net.Conn, error) {
+	return (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext
 }
 
 // ImpersonationConfig has all the available impersonation options
