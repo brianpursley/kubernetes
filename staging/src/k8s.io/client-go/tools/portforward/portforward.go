@@ -407,7 +407,6 @@ func (pf *PortForwarder) handleConnection(conn net.Conn, port ForwardedPort) {
 	err = <-errorChan
 	if err != nil {
 		runtime.HandleError(err)
-		pf.streamConn.Close()
 	}
 }
 
