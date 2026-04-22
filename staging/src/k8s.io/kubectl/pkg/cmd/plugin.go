@@ -84,7 +84,21 @@ func (h *DefaultPluginHandler) Execute(executablePath string, cmdArgs, environme
 
 	// invoke cmd binary relaying the environment and args given
 	// append executablePath to cmdArgs, as execve will make first argument the "binary name".
-	return syscall.Exec(executablePath, append([]string{executablePath}, cmdArgs...), environment)
+	attr := &syscall.ProcAttr{
+		Files: []uintptr{os.Stdin.Fd(), os.Stdout.Fd(), os.Stderr.Fd()},
+		Env:   environment,
+	}
+	pid, err := syscall.ForkExec(executablePath, append([]string{executablePath}, cmdArgs...), attr)
+	if err != nil {
+		return err
+	}
+
+	// Wait for the plugin to finish, and exit with the same code as the plugin process.
+	var ws syscall.WaitStatus
+	if _, err = syscall.Wait4(pid, &ws, 0, nil); err == nil {
+		os.Exit(ws.ExitStatus())
+	}
+	return err
 }
 
 func command(name string, arg ...string) *exec.Cmd {
