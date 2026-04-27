@@ -111,7 +111,7 @@ func NewCmdPortForward(f cmdutil.Factory, streams genericiooptions.IOStreams) *c
 		Run: func(cmd *cobra.Command, args []string) {
 			cmdutil.CheckErr(opts.Complete(f, cmd, args))
 			cmdutil.CheckErr(opts.Validate())
-			cmdutil.CheckErr(opts.RunPortForward())
+			cmdutil.CheckErr(opts.RunPortForwardContext(cmd.Context()))
 		},
 	}
 	cmdutil.AddPodRunningTimeoutFlag(cmd, defaultPodPortForwardWaitTimeout)
@@ -408,11 +408,6 @@ func (o PortForwardOptions) Validate() error {
 		return fmt.Errorf("client, client config, restClient, and portforwarder must be provided")
 	}
 	return nil
-}
-
-// Deprecated: Use RunPortForwardContext instead, which allows canceling.
-func (o PortForwardOptions) RunPortForward() error {
-	return o.RunPortForwardContext(context.Background())
 }
 
 // RunPortForwardContext implements all the necessary functionality for port-forward cmd.
