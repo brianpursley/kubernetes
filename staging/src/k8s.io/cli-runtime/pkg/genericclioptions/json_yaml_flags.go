@@ -31,7 +31,7 @@ func (f *JSONYamlPrintFlags) AllowedFormats() []string {
 	if f == nil {
 		return []string{}
 	}
-	formats := []string{"json", "yaml"}
+	formats := []string{"json", "jsonl", "yaml"}
 	// We can't use the cmdutil pkg directly because of import cycle.
 	if strings.ToLower(os.Getenv("KUBECTL_KYAML")) != "false" {
 		formats = append(formats, "kyaml")
@@ -63,6 +63,8 @@ func (f *JSONYamlPrintFlags) ToPrinter(outputFormat string) (printers.ResourcePr
 	switch outputFormat {
 	case "json":
 		printer = &printers.JSONPrinter{}
+	case "jsonl":
+		printer = &printers.JSONLPrinter{}
 	case "yaml":
 		printer = &printers.YAMLPrinter{}
 	case "kyaml":

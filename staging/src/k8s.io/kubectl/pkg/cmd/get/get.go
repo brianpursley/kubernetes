@@ -718,6 +718,23 @@ func (o *GetOptions) watch(f cmdutil.Factory, args []string) error {
 }
 
 func (o *GetOptions) printGeneric(r *resource.Result) error {
+	printer, err := o.ToPrinter(nil, nil, false, false)
+	if err != nil {
+		return err
+	}
+
+	// If the output format is jsonl, we don't use .Infos() because it requires loading all objects into memory,
+	// which is unnecessary for jsonl output and can be very expensive in terms of memory usage. Instead, we use
+	// .Visit() to stream objects one at a time and print them as JSON lines.
+	if *o.PrintFlags.OutputFormat == "jsonl" {
+		return r.Visit(func(info *resource.Info, err error) error {
+			if err != nil {
+				return err
+			}
+			return printer.PrintObj(info.Object, o.Out)
+		})
+	}
+
 	// we flattened the data from the builder, so we have individual items, but now we'd like to either:
 	// 1. if there is more than one item, combine them all into a single list
 	// 2. if there is a single item and that item is a list, leave it as its specific list
@@ -734,11 +751,6 @@ func (o *GetOptions) printGeneric(r *resource.Result) error {
 
 	if len(infos) == 0 && o.IgnoreNotFound {
 		return utilerrors.Reduce(utilerrors.Flatten(utilerrors.NewAggregate(errs)))
-	}
-
-	printer, err := o.ToPrinter(nil, nil, false, false)
-	if err != nil {
-		return err
 	}
 
 	var obj runtime.Object
